@@ -1,0 +1,8 @@
+# 虚拟环境
+.venv/
+
+# Python 字节码缓存
+__pycache__/
+
+# IDE
+.idea/

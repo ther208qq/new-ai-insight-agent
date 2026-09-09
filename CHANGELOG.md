@@ -1,5 +1,12 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.2] - 2026-09-09
+
+## schemas 更新
+- core_features 属性更新：每项由字符串改为 { description, evidence[] }，数量仍限 1~8
+- Technology.evidence 由 str|None 改为 list[str]（默认空列表）
+- Architecture 新增 evidence[] 字段
+
 ## [1.0.1] - 2026-09-08
 
 ## 模块职责
