@@ -4,7 +4,19 @@
 作为 LLM 世界与传统后端世界之间的边界。
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.evidence import Evidence
+
+IssueType = Literal[
+    "factual_error",
+    "unsupported_claim",
+    "missing_evidence",
+    "low_quality",
+    "contradiction",
+]
 
 
 class ReflectionIssue(BaseModel):
@@ -16,9 +28,12 @@ class ReflectionIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     field: str = Field(description="出问题的字段名")
-    type: str = Field(description="问题类型，例如 缺失字段 / 类型错误 / 逻辑错误")
+    type: IssueType = Field(description="问题类型（固定枚举）")
     description: str = Field(description="问题描述")
-    evidence: str = Field(description="支撑该问题的证据 / 依据")
+    evidence: list[Evidence] = Field(
+        default_factory=list,
+        description="支撑该问题的证据列表（Evidence 对象）",
+    )
 
 
 class ReflectionResult(BaseModel):

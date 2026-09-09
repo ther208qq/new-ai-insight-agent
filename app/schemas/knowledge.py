@@ -7,7 +7,21 @@
 支撑证据列表，便于溯源与评审。
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.evidence import Evidence
+
+TechnologyCategory = Literal[
+    "framework",
+    "language",
+    "database",
+    "infrastructure",
+    "library",
+    "model",
+    "other",
+]
 
 
 class Feature(BaseModel):
@@ -18,7 +32,7 @@ class Feature(BaseModel):
     """
 
     description: str = Field(description="核心功能描述")
-    evidence: list[str] = Field(
+    evidence: list[Evidence] = Field(
         default_factory=list,
         description="支撑该核心功能的证据 / 依据列表",
     )
@@ -32,8 +46,13 @@ class Technology(BaseModel):
     """
 
     name: str = Field(description="技术名称，例如 FastAPI、PostgreSQL、Redis")
-    category: str = Field(description="技术分类，例如 后端框架 / 数据库 / 消息队列 / 部署")
-    evidence: list[str] = Field(
+    category: TechnologyCategory = Field(
+        description=(
+            "技术分类（固定枚举）：framework / language / database / "
+            "infrastructure / library / model / other"
+        )
+    )
+    evidence: list[Evidence] = Field(
         default_factory=list,
         description="支撑该选型的证据 / 依据列表",
     )
@@ -46,7 +65,10 @@ class Architecture(BaseModel):
     设计决策与权衡；evidence 给出支撑该架构设计的证据 / 依据列表。
     """
 
-    pattern: str = Field(description="架构模式，例如 分层架构 / 微服务 / 事件驱动")
+    pattern: str = Field(
+        default="",
+        description="架构模式，允许为空，例如 分层架构 / 微服务 / 事件驱动",
+    )
     components: list[str] = Field(
         description="架构组件列表，例如 [API 网关, 消息队列, 缓存]"
     )
@@ -55,7 +77,7 @@ class Architecture(BaseModel):
         default=None,
         description="补充说明：关键设计决策与权衡",
     )
-    evidence: list[str] = Field(
+    evidence: list[Evidence] = Field(
         default_factory=list,
         description="支撑该架构设计的证据 / 依据列表",
     )
@@ -66,7 +88,7 @@ class KnowledgeProposal(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    title: str = Field(min_length=1, description="提案标题（必填）")
+    title: str = Field(min_length=1, max_length=200, description="提案标题（必填，长度 ≤ 200）")
     summary: str = Field(min_length=1, description="提案摘要（必填）")
     problem: str = Field(min_length=1, description="要解决的问题（必填）")
 
