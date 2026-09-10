@@ -1,5 +1,26 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.5] - 2026-09-10
+
+## Knowledge Agent 最小版本
+- 新增 agents/knowledge_agent.py：KnowledgeAgent(owner, repo)，run() 固定依次调用 get_project_metadata → get_readme，把两个返回值落成 Evidence 写入 State，返回 KnowledgeProcessState（status="collecting"，每次 run 新建 process_id）
+- 新增 graph/evidence.py：Tool 产出 → Evidence → State 的代码层转换（metadata_to_evidence / document_to_evidence / record_evidence），Evidence 全程由代码生成，LLM 不参与
+- 暂未实现：LLM、Tool Calling Loop、Harness、Reflection、Relation、数据库
+
+## schemas 更新
+- 新增 schemas/project.py：ProjectMetadata（name / description / url / language / stars / topics）
+- 新增 schemas/document.py：DocumentContent（path / content / truncated），README 与普通源码文件共用
+- schemas/__init__.py 新增导出 ProjectMetadata / DocumentContent
+
+## tools 更新
+- 新增 tools/get_project_metadata.py：get_project_metadata(owner, repo) → ProjectMetadata，返回固定模拟数据，暂不访问 GitHub API
+- 新增 tools/get_readme.py：get_readme(owner, repo) → DocumentContent，返回固定模拟 README，暂不访问 GitHub API
+- tools/get_file.py / get_project_structure.py / search_code.py 已建空文件，尚未实现
+
+## tests
+- 新增 tests/：test_get_project_metadata（2）、test_get_readme（1）、test_evidence（7）、test_knowledge_agent（2），共 12 个用例
+- 运行方式：python -m pytest tests -q
+
 ## [1.0.4] - 2026-09-09
 
 
