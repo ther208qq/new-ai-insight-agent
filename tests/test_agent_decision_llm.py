@@ -20,7 +20,7 @@ def test_state_到_llm_到_agent_decision_这条链路能跑通():
     )
     agent = _agent(llm)
 
-    state = agent.run()
+    state = agent.initialize_state()
     decision = agent.decide(state)
 
     assert isinstance(decision, AgentDecision)
@@ -33,7 +33,7 @@ def test_送进_llm_的_context_就是当前_state_里的_evidence():
     llm = FakeLLM({"action": "finish"})
     agent = _agent(llm)
 
-    state = agent.run()
+    state = agent.initialize_state()
     agent.decide(state)
 
     prompt = llm.calls[0]["user"]
@@ -47,7 +47,7 @@ def test_送进_llm_的_context_就是当前_state_里的_evidence():
 def test_llm_也可以返回_finish():
     agent = _agent(FakeLLM({"action": "finish"}))
 
-    decision = agent.decide(agent.run())
+    decision = agent.decide(agent.initialize_state())
 
     assert decision.action == "finish"
     assert decision.tool_name is None
@@ -58,7 +58,7 @@ def test_llm_返回的决策必须符合_agent_decision_结构():
     # 模型吐 JSON 文本也走同一条校验路径
     llm = FakeLLM('{"action": "tool_call", "tool_name": "get_file"}')
 
-    decision = _agent(llm).decide(_agent().run())
+    decision = _agent(llm).decide(_agent().initialize_state())
 
     assert decision.tool_name == "get_file"
 
@@ -67,13 +67,15 @@ def test_llm_返回了_schema_之外的动作会被拒绝():
     agent = _agent(FakeLLM({"action": "think"}))
 
     with pytest.raises(Exception):
-        agent.decide(agent.run())
+        agent.decide(agent.initialize_state())
 
 
 def test_没有配置_llm_时_采集仍然可用_只有决策报错():
     agent = _agent()
 
-    state = agent.run()
+    # run() 现在还要走 investigate + generate_proposal（都要 LLM），
+    # 「没接 LLM 也能采集」这条说的是 initialize_state()
+    state = agent.initialize_state()
     assert len(state.evidence) == 2
 
     with pytest.raises(LLMNotConfiguredError):

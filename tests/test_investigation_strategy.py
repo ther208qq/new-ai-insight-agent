@@ -35,7 +35,7 @@ def test_信息已足够时_一次_tool_都不调用直接_finish():
     llm = FakeLLM(_FINISH)
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     assert len(llm.calls) == 1
     assert result.tool_call_count == 0
@@ -47,7 +47,7 @@ def test_有缺口时先补目录结构再_finish():
     llm = FakeLLM(_tool_call("get_project_structure"), _FINISH)
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     assert [e.evidence_type for e in result.evidence] == [
         "metadata",
@@ -71,7 +71,7 @@ def test_三步调查策略可以完整走通():
     )
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     assert [e.evidence_type for e in result.evidence] == [
         "metadata",
@@ -95,7 +95,7 @@ def test_搜索定位到文件后_get_file_能读到搜索结果里的行():
     )
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     search_evidence, code_evidence = result.evidence[-2], result.evidence[-1]
 
@@ -121,7 +121,7 @@ def test_读不存在的文件会中断():
     agent = _agent(llm)
 
     try:
-        agent.investigate(agent.run())
+        agent.investigate(agent.initialize_state())
     except FileNotFoundError as error:
         assert "文件不存在" in str(error)
     else:
@@ -133,7 +133,7 @@ def test_搜不到结果不是错误_而是一条有效证据():
     llm = FakeLLM(_tool_call("search_code", query="zzz不存在zzz"), _FINISH)
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     assert result.evidence[-1].evidence_type == "search"
     assert result.evidence[-1].location == "search:zzz不存在zzz"

@@ -3,8 +3,12 @@ from app.schemas.document import DocumentContent
 from app.schemas.evidence import Evidence, EvidenceType
 from app.schemas.knowledge import (
     Architecture,
+    DraftArchitecture,
+    DraftFeature,
+    DraftTechnology,
     Feature,
     KnowledgeProposal,
+    ProposalDraft,
     Technology,
 )
 from app.schemas.project import ProjectMetadata
@@ -25,6 +29,10 @@ __all__ = [
     "Feature",
     "Technology",
     "Architecture",
+    "ProposalDraft",
+    "DraftFeature",
+    "DraftTechnology",
+    "DraftArchitecture",
     "ProjectMetadata",
     "ReflectionResult",
     "ReflectionIssue",

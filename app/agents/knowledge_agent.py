@@ -3,25 +3,29 @@
 给定一个 GitHub 项目的 owner / repo，分两层：
 
 1. 采集（已有）：get_project_metadata + get_readme → Evidence → State.evidence，
-   调什么、按什么顺序写死在 run() 里，全程没有 LLM 参与。
+   调什么、按什么顺序写死在 initialize_state() 里，全程没有 LLM 参与。
 2. 决策（已有）：把 State 里已有的 Evidence 组织成 Context 交给 LLM，
    由 LLM 输出一个 AgentDecision —— 信息不够就指名下一个要调的 Tool，
    够了就 finish。
 3. 执行（已有）：AgentDecision(action="tool_call") → 找到 Tool → 执行 →
    Tool Result 转成 Evidence → 追加进 State.evidence。
-4. 调查循环（本阶段新增）：investigate() 把 2 和 3 串起来 —— 反复
+4. 调查循环（已有）：investigate() 把 2 和 3 串起来 —— 反复
    「决策 → 执行 → 再决策」，直到 LLM 说 finish。
+5. 提案生成（本阶段新增）：generate_proposal() 拿调查完的 State 再问一次 LLM，
+   把 Evidence 归纳成 KnowledgeProposal 写进 State.proposal。
 
-分工是刻意的：decide() 只决策一次，execute() 只执行一次，谁都不含循环；
-循环只存在于 investigate() 里。Harness、Reflection、KnowledgeProposal
-生成仍未实现。
+分工是刻意的：decide() 只决策一次，execute() 只执行一次，generate_proposal()
+只生成一次，谁都不含循环；循环只存在于 investigate() 里。run() 自身不含逻辑，
+只是把「采集 → 调查 → 生成提案」三步串起来。Harness、Reflection 仍未实现。
 """
 
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
-from app.agents.prompts import DECISION_SYSTEM_PROMPT
+from pydantic import ValidationError
+
+from app.agents.prompts import DECISION_SYSTEM_PROMPT, PROPOSAL_SYSTEM_PROMPT
 from app.graph.context import build_context
 from app.graph.evidence import (
     document_to_evidence,
@@ -30,24 +34,19 @@ from app.graph.evidence import (
     search_to_evidence,
     structure_to_evidence,
 )
+from app.graph.proposal import EvidenceReferenceError, build_proposal
 from app.graph.state import KnowledgeProcessState, Source
 from app.llm.client import LLMClient, LLMNotConfiguredError
 from app.schemas.decision import AgentDecision
 from app.schemas.evidence import Evidence
+from app.schemas.knowledge import ProposalDraft
 from app.tools.get_project_metadata import get_project_metadata
 from app.tools.get_readme import get_readme
 from app.tools.registry import call_tool
 
 
-# investigate() 的安全上限：一轮调查最多执行多少次 Tool。
-# 这是兜底，不是正常完成条件 —— 正常情况下应该由 LLM 返回 finish 来结束
-# （见 investigate 的说明）。取值只需盖住「合理调查一个仓库」的量级。
 MAX_TOOL_CALLS = 5
 
-# tool_name → Tool Result 的 Evidence 转换器。
-# execute() 用它把任意 Tool 的产出接进 State.evidence；也就是说，一个 Tool
-# 要在执行层可用，必须在 ALLOWED_TOOLS 和这里**同时**登记 —— 只登记前者
-# 会在转换时 KeyError，只登记后者不会被调用到。
 EVIDENCE_CONVERTERS: dict[str, Callable[[Any], Evidence]] = {
     "get_project_structure": structure_to_evidence,
     "get_file": document_to_evidence,
@@ -62,8 +61,8 @@ class NotAToolCallError(RuntimeError):
 class KnowledgeAgent:
     """一次运行 = 一个实例。
 
-    llm 不传时 Agent 仍可采集证据，只是不能做决策 —— 决策那一刻才报错，
-    这样「暂时没接 LLM」不会连采集都用不了。
+    llm 不传时 Agent 仍可采集证据，只是不能做决策、也不能生成提案 ——
+    用到 LLM 的那一刻才报错，这样「暂时没接 LLM」不会连采集都用不了。
     """
 
     def __init__(
@@ -80,11 +79,14 @@ class KnowledgeAgent:
             type="github",
         )
 
-    def run(self) -> KnowledgeProcessState:
-        """收集证据，返回更新后的 State。
+    def initialize_state(self) -> KnowledgeProcessState:
+        """新建 State，并固定采集基础信息（metadata + README）。
 
         每调用一次都会新建一个 State（process_id 是新的），
-        所以两次 run() 之间不会互相污染。
+        所以两次调用之间不会互相污染。
+
+        调什么 Tool、按什么顺序，全写死在这里 —— 全程没有 LLM 参与。
+        只想要采集结果、还不想接 LLM 时，调这个方法（run() 后两步都要 LLM）。
         """
         state = KnowledgeProcessState(
             process_id=uuid4().hex,
@@ -92,14 +94,24 @@ class KnowledgeAgent:
             status="collecting",
         )
 
-        # 两个 Tool 的返回值由代码转成 Evidence —— 全程没有 LLM 参与
-        state = record_evidence(
+        # 两个 Tool 的返回值由代码转成 Evidence
+        return record_evidence(
             state,
             metadata_to_evidence(get_project_metadata(self.owner, self.repo)),
             document_to_evidence(get_readme(self.owner, self.repo)),
         )
 
-        return state
+    def run(self) -> KnowledgeProcessState:
+        """完整流程：采集 → 调查 → 生成提案。
+
+            initialize_state → investigate → generate_proposal
+
+        自身不含任何逻辑，只是把三步串起来。后两步都要 LLM，所以没配 LLM 时
+        会在那一步报错；只想要采集结果就调 initialize_state()。
+        """
+        state = self.initialize_state()
+        state = self.investigate(state)
+        return self.generate_proposal(state)
 
     def build_context(self, state: KnowledgeProcessState) -> str:
         """把 State 中已有的 Evidence 组织成交给 LLM 的 Context。"""
@@ -187,6 +199,7 @@ class KnowledgeAgent:
         while state.tool_call_count < MAX_TOOL_CALLS:
             decision = self.decide(state)
 
+
             if decision.action == "finish":
                 return state
 
@@ -198,3 +211,64 @@ class KnowledgeAgent:
             )
 
         return state
+
+    def generate_proposal(
+        self, state: KnowledgeProcessState
+    ) -> KnowledgeProcessState:
+        """把调查完的 Evidence 归纳成 KnowledgeProposal，写进 State。
+
+            Evidence → Context → LLM(ProposalDraft) → 代码回填 → KnowledgeProposal
+
+        只做这一件事：不调 Tool、不改 Evidence、不反思、不落库、不建关系。
+        investigate() 返回 finish 只意味着「Evidence 够了」，提案在这里才生成，
+        所以这一步不会让 tool_call_count 变化。
+
+        字段分工：title 与每条 evidence 的正文由代码填（owner/repo 与
+        state.evidence 里的原文），其余字段由 LLM 归纳 —— 见 build_proposal()。
+
+        和 run() / investigate() 一样不修改传入的 state。失败时返回的是
+        status="failed" 的新 State，而不是抛错（见 _failed）。
+        """
+        if self.llm is None:
+            raise LLMNotConfiguredError(
+                "KnowledgeAgent 没有配置 LLM，无法生成提案（构造时传入 llm=...）"
+            )
+
+        # 没有 Evidence 就没有可归纳的对象。这里不抛错而是落成失败状态 ——
+        # 凭空写一份提案就是设计文档里说的「静默返回一个假 Proposal」。
+        if not state.evidence:
+            return _failed(state, "没有 Evidence，无法生成 KnowledgeProposal")
+
+        try:
+            draft = self.llm.complete(
+                system=PROPOSAL_SYSTEM_PROMPT,
+                user=self.build_context(state),
+                response_model=ProposalDraft,
+            )
+        except ValidationError as error:
+            # ValidationError 只可能来自 LLM 的输出 —— 校验在 LLM 边界发生，
+            # 拼装成品时再炸的话是代码的 bug，不该被这里吞掉。
+            return _failed(state, f"LLM 输出不符合 ProposalDraft：{error}")
+
+        try:
+            proposal = build_proposal(
+                draft, state, title=f"{self.owner}/{self.repo}"
+            )
+        except EvidenceReferenceError as error:
+            return _failed(state, str(error))
+
+        return state.model_copy(
+            update={"proposal": proposal, "status": "analyzing"}
+        )
+
+
+def _failed(
+    state: KnowledgeProcessState, message: str
+) -> KnowledgeProcessState:
+    """把 State 落成失败态，返回新对象（不修改传入的 state）。
+
+    提案一并置回 None：失败态不该留着一份（可能来自上一次调用的）旧提案。
+    """
+    return state.model_copy(
+        update={"proposal": None, "status": "failed", "error": message}
+    )

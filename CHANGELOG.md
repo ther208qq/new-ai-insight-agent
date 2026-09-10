@@ -1,5 +1,63 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.8] - 2026-09-10
+
+## 接入真实 LLM（OpenAI 兼容端点 + .env 配置）
+- 新增 `app/config.py`：`LLMSettings` + `load_llm_settings()` + `ConfigError`。配置只在这里读、读出来就校验 —— 少一个环境变量在这里报错，而不是等到调 LLM 时冒出一句看不懂的 401；数字写错会点名是哪个变量。真实环境变量优先于 `.env`（`override=False`），部署时好覆盖
+- 环境变量：`LLM_API_KEY`（必填）、`LLM_MODEL`（必填）、`LLM_BASE_URL`、`LLM_TIMEOUT`(60)、`LLM_MAX_TOKENS`、`LLM_TEMPERATURE`(0)
+- 新增 `app/llm/openai_compatible.py`：`OpenAIClient`，实现 `LLMClient`。任何说 `/chat/completions` 的服务都能接（OpenAI / DeepSeek / 通义 / Moonshot / vLLM / Ollama），换家只改 .env
+- 结构化输出三档，从强到弱（`_mode` 记住当前档位，`mode` 属性可查）：
+  - ① `json_schema` —— 原生 `response_format={"type": "json_schema", strict: True}`，字段名与类型由服务端保证
+  - ② `json_object` —— 只保证「回复是合法 JSON」，schema 写进提示词，字段对不对由 pydantic 判
+  - ③ `prompt` —— 连 json_object 都没有：schema 只写在提示词里，拿回来剥掉可能的代码块/前后话再用 pydantic 校验
+  - 每档被拒就往下退一档并立刻用新档重试，所以第一次调用最多发三次请求；试通之后停在那里，后续不再白试。三档的差别只在「谁来保证结构」：档 ① 是服务端，档 ②③ 都是 pydantic
+  - 降级只在「报错信息里出现 response_format / json_schema / json mode / json_object」时触发；其他 400（比如模型名写错）照抛，不伪装成「降级后仍然失败」
+- **实测（DeepSeek）**：DeepSeek 拒绝 `json_schema`，停在档 ② `json_object` —— 它支持 json_object 但不支持自定义 json_schema。所以「让服务端保证字段名」这条路目前走不通，最终仍由 pydantic 兜底
+- `_strict_schema()`：把 pydantic 生成的 schema 调成严格模式要的样子（递归补 `required` 列全所有 properties、`additionalProperties: false`）。**不补会直接 400** —— `AgentDecision.tool_name`、`DraftFeature.evidence_refs` 这类有默认值的字段，pydantic 原本不放进 `required`
+- `max_tokens` 留空就不传该参数；用 `max_tokens` 而不是 `max_completion_tokens`，前者是各家兼容端点的最大公约数
+- `app/llm/__init__.py` 新增 `create_llm_client()`：调用方一句 `KnowledgeAgent(owner, repo, llm=create_llm_client())` 即可，不必知道背后是哪家
+- 新增 `.env.example`（模板，提交）与 `.gitignore` 的 `.env` 条目（**此前 .gitignore 里没有 .env，密钥会被提交**）
+- 新增 `requirements.txt`：项目此前没有依赖清单
+
+## 提示词调优（实测反馈）
+- 真实运行发现 LLM 把 `pyproject.toml` 当成技术写进了 `technologies`（category=other）。文件只能说明「存在这么一个文件」，说明不了选型，属于凭空推断
+- `PROPOSAL_SYSTEM_PROMPT` 的「输出结构」里，technologies 的 `name` 补上示例与反例（「例如 Python / FastAPI / PostgreSQL，不是文件名」）
+- 「硬性约束」新增第 3 条：technologies 只写语言 / 框架 / 库 / 数据库 / 基础设施 / 模型，文件名、配置文件、目录名一律不算；原第 3~6 条顺延为 4~7
+- 另一处待办（**本次未动**）：`core_features` 目前会写成实现细节而不是「项目提供的功能」，粒度偏细
+
+## 入口脚本
+- 新增根目录 `main.py`：`KnowledgeAgent(owner, repo, llm=create_llm_client()).run()`，打印 process_id / status / 实际走的档位 / Tool 调用次数 / Evidence 清单，最后把 `state.proposal` 按 JSON 打出来
+- 用法 `python main.py [owner] [repo]`，不传参用 `example/demo-project`（底层仍是 mock 数据）
+- 两处容易踩的坑在脚本里显式处理了：`.env` 缺配置抛 `ConfigError` 要先接住；`generate_proposal()` 失败是落成 `status="failed"` 而不是抛异常，不能只等异常
+- 档位用 `getattr(llm, "mode", "未知")` 取 —— `mode` 是 `OpenAIClient` 的实现细节，不在 `LLMClient` 协议里
+
+## 待接
+- `main.py` 是临时入口，`run_knowledge_agent.cpython-313.pyc` 残留的源码仍不在
+
+## [1.0.7] - 2026-09-10
+
+## KnowledgeProposal 生成（generate_proposal）
+- 链路补齐：`initialize_state → investigate → generate_proposal`，`KnowledgeProcessState.proposal` 终于有人填了。此前 finish 之后提案无人生成，`status` 永远停在 collecting
+- `run()` 改为三段式，自身不含逻辑；原来写死在 run() 里的固定采集挪进新增的 `initialize_state()`（调什么 Tool、什么顺序仍写死，全程无 LLM）
+- 新增 `agent.generate_proposal(state)`：Evidence → Context → LLM → 代码回填 → KnowledgeProposal。只做这一件事 —— 不调 Tool、不改 Evidence、不反思、不落库、不建关系
+- 字段分工（原则：代码能确定的就不交给 LLM）
+  - 代码：`title`（owner/repo）、每条 `evidence` 的正文（按编号从 state.evidence 取原文）
+  - LLM：summary / problem / core_features / technologies / architecture / learning_points
+- 新增 `schemas/knowledge.py` 的 ProposalDraft / DraftFeature / DraftTechnology / DraftArchitecture：LLM 侧的输出结构，与成品只差两处 —— 没有 title，evidence 是 `list[int]` 编号
+  - 为什么不让 LLM 直接输出 KnowledgeProposal：那个 schema 的 evidence 是 `list[Evidence]`（含正文），等于要求 LLM 把证据再写一遍，而 evidence.py 的约定是「Evidence 必须由代码生成」。草稿不是第二套 Proposal，落库仍只有 KnowledgeProposal 一个
+- 新增 `graph/proposal.py`：`build_proposal(draft, state, title=...)` —— 纯函数，把编号换回 State 里的原文、补上 title，拼出成品；与 graph/context.py 是同一层的一对（前者 State→文本，后者 LLM 草稿+State→结构）
+- 新增 `EvidenceReferenceError`：草稿引用了不存在的编号就报错，**不静默丢弃**（编号对不上说明 LLM 在编造引用，静默丢会让提案带着无法回溯的结论落库）
+- 新增 `PROPOSAL_SYSTEM_PROMPT`，独立于 DECISION_SYSTEM_PROMPT（提示词与 schema 一一对应的惯例保持）；约束包括：只能依据 Evidence、不许猜测、不许因为「同类项目都这么写」就断定本项目用了某项技术、README 与代码冲突时以代码为准、learning_points 必须来自项目实际做法
+- Proposal 阶段复用 `build_context(state)`：它渲染的就是 Evidence（metadata 已经在 evidence[0] 里），不重复传 metadata，也不把整个 State 序列化给 LLM
+- 失败出口（设计文档第十节，不静默返回假 Proposal）：没有 Evidence / LLM 输出过不了校验 / 引用编号越界 → `status="failed"` + `error`，proposal 置回 None；`LLMNotConfiguredError` 与网络错仍直接抛
+- 成功后 `status="analyzing"`（提案是分析阶段的产物）
+
+## tests
+- 新增 tests/test_generate_proposal.py（12）：正常生成、title 来自代码（并钉住 ProposalDraft 没有 title 字段）、成品能过 KnowledgeProposal 校验、evidence 正文来自 state、生成阶段不调 Tool（monkeypatch call_tool）、编号越界/输出不合法/无 Evidence 的失败出口、不改传入 state、无 LLM 报错、run() 端到端含 proposal、run() 把 Tool 产出的 evidence 一并带进提案阶段
+- 受 run() 三段式影响的现有测试改调 initialize_state()（它们本就在测采集那一步）：test_knowledge_agent（2）、test_agent_decision_llm（6）、test_execute_tool_call（8）、test_investigate（7）、test_investigation_strategy（6）
+- 全量 56 passed
+- 仍未验证：FakeLLM 的草稿是脚本写死的，所以「LLM 能否从 Evidence 归纳出可靠的提案」没有被验证 —— 需要真实 LLM 客户端
+
 ## [1.0.6] - 2026-09-10
 
 ## AgentDecision schema

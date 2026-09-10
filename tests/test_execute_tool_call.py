@@ -19,7 +19,7 @@ def _tool_call(tool_name="get_project_structure", tool_arguments=None):
 
 def test_agent_decision_到_tool_到_evidence_到_state():
     agent = _agent()
-    state = agent.run()
+    state = agent.initialize_state()
     before = len(state.evidence)
 
     decision = _tool_call(tool_arguments={"owner": "example", "repo": "demo-project"})
@@ -39,7 +39,7 @@ def test_agent_decision_到_tool_到_evidence_到_state():
 
 def test_执行不修改传入的_state():
     agent = _agent()
-    state = agent.run()
+    state = agent.initialize_state()
 
     agent.execute(state, _tool_call())
 
@@ -51,7 +51,7 @@ def test_llm_给的_owner_repo_被当前仓库覆盖():
     decision = _tool_call(tool_arguments={"owner": "别人", "repo": "别的仓库"})
 
     # Tool 是按当前 Agent 的 owner/repo 去取的，LLM 填的值不生效
-    new_state = agent.execute(agent.run(), decision)
+    new_state = agent.execute(agent.initialize_state(), decision)
 
     assert new_state.evidence[-1].location == "."
 
@@ -62,32 +62,32 @@ def test_不支持的_tool_会明确报错():
     # search_code 曾经是不可执行的例子，现在已接进执行层。
     # 换成一个确实不在 ALLOWED_TOOLS 里、但对 LLM 可见的名字。
     with pytest.raises(UnsupportedToolError, match="不支持的 Tool"):
-        agent.execute(agent.run(), _tool_call(tool_name="get_project_metadata"))
+        agent.execute(agent.initialize_state(), _tool_call(tool_name="get_project_metadata"))
 
 
 def test_编造的_tool_名也会被拒绝():
     agent = _agent()
 
     with pytest.raises(UnsupportedToolError, match="不支持的 Tool"):
-        agent.execute(agent.run(), _tool_call(tool_name="totally_made_up"))
+        agent.execute(agent.initialize_state(), _tool_call(tool_name="totally_made_up"))
 
 
 def test_多传了参数会报错():
     agent = _agent()
 
     with pytest.raises(UnsupportedToolError, match="不接受参数"):
-        agent.execute(agent.run(), _tool_call(tool_arguments={"depth": 3}))
+        agent.execute(agent.initialize_state(), _tool_call(tool_arguments={"depth": 3}))
 
 
 def test_finish_决策不会被_execute_执行():
     agent = _agent()
 
     with pytest.raises(NotAToolCallError):
-        agent.execute(agent.run(), AgentDecision(action="finish"))
+        agent.execute(agent.initialize_state(), AgentDecision(action="finish"))
 
 
 def test_tool_call_但缺_tool_name_会报错():
     agent = _agent()
 
     with pytest.raises(NotAToolCallError):
-        agent.execute(agent.run(), AgentDecision(action="tool_call"))
+        agent.execute(agent.initialize_state(), AgentDecision(action="tool_call"))

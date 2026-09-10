@@ -2,8 +2,10 @@ from app.agents.knowledge_agent import KnowledgeAgent
 from app.graph.state import KnowledgeProcessState
 
 
-def test_运行后_state_里同时有_metadata_和_readme_两条_evidence():
-    state = KnowledgeAgent(owner="example", repo="demo-project").run()
+def test_初始化后_state_里同时有_metadata_和_readme_两条_evidence():
+    # run() 现在还要走 investigate + generate_proposal（都要 LLM），
+    # 只想验证采集这一步，所以调 initialize_state()
+    state = KnowledgeAgent(owner="example", repo="demo-project").initialize_state()
 
     assert isinstance(state, KnowledgeProcessState)
     assert len(state.evidence) == 2
@@ -20,8 +22,8 @@ def test_运行后_state_里同时有_metadata_和_readme_两条_evidence():
 def test_source_由_owner_和_repo_组成_且每次运行互不影响():
     agent = KnowledgeAgent(owner="example", repo="demo-project")
 
-    first = agent.run()
-    second = agent.run()
+    first = agent.initialize_state()
+    second = agent.initialize_state()
 
     assert first.source.url == "https://github.com/example/demo-project"
     assert first.source.type == "github"

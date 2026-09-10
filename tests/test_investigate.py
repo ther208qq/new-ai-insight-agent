@@ -17,7 +17,7 @@ def test_一轮_tool_call_后_finish_就结束():
     llm = FakeLLM(_TOOL_CALL, _FINISH)
     agent = _agent(llm)
 
-    state = agent.run()
+    state = agent.initialize_state()
     result = agent.investigate(state)
 
     # 决策了两次：一次选 Tool，一次说够了
@@ -36,7 +36,7 @@ def test_一轮_tool_call_后_finish_就结束():
 def test_传入的_state_不会被修改():
     llm = FakeLLM(_TOOL_CALL, _FINISH)
     agent = _agent(llm)
-    state = agent.run()
+    state = agent.initialize_state()
 
     result = agent.investigate(state)
 
@@ -50,7 +50,7 @@ def test_第二轮决策能看到上一轮新增的_evidence():
     llm = FakeLLM(_TOOL_CALL, _FINISH)
     agent = _agent(llm)
 
-    agent.investigate(agent.run())
+    agent.investigate(agent.initialize_state())
 
     # 第二次 decide 的 Context 里必须已经含有 get_project_structure 的产出
     second_context = llm.calls[1]["user"]
@@ -62,7 +62,7 @@ def test_第一次就_finish_则一次_tool_都不执行():
     llm = FakeLLM(_FINISH)
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     assert len(llm.calls) == 1
     assert result.tool_call_count == 0
@@ -74,7 +74,7 @@ def test_反复_tool_call_会在达到上限后停止_不会无限循环():
     llm = FakeLLM(*([_TOOL_CALL] * (MAX_TOOL_CALLS + 3)))
     agent = _agent(llm)
 
-    result = agent.investigate(agent.run())
+    result = agent.investigate(agent.initialize_state())
 
     assert result.tool_call_count == MAX_TOOL_CALLS
     assert len(llm.calls) == MAX_TOOL_CALLS
@@ -87,7 +87,7 @@ def test_state_已在上限时直接返回_不调用_llm():
     # 空脚本：只要 decide() 被调一次，FakeLLM 就会报错
     llm = FakeLLM()
     agent = _agent(llm)
-    state = agent.run().model_copy(update={"tool_call_count": MAX_TOOL_CALLS})
+    state = agent.initialize_state().model_copy(update={"tool_call_count": MAX_TOOL_CALLS})
 
     result = agent.investigate(state)
 
@@ -98,7 +98,7 @@ def test_state_已在上限时直接返回_不调用_llm():
 def test_可以接着已有计数继续调查():
     llm = FakeLLM(_TOOL_CALL, _FINISH)
     agent = _agent(llm)
-    state = agent.run().model_copy(update={"tool_call_count": MAX_TOOL_CALLS - 1})
+    state = agent.initialize_state().model_copy(update={"tool_call_count": MAX_TOOL_CALLS - 1})
 
     result = agent.investigate(state)
 

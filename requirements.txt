@@ -1,0 +1,7 @@
+# 运行时依赖
+pydantic>=2.13
+python-dotenv>=1.0
+openai>=3.0
+
+# 开发 / 测试
+pytest>=9.0
