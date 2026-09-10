@@ -8,7 +8,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-EvidenceType = Literal["readme", "code", "metadata", "documentation", "other"]
+EvidenceType = Literal[
+    "readme",
+    "code",
+    "metadata",
+    "structure",
+    "search",
+    "documentation",
+    "other",
+]
 
 
 class Evidence(BaseModel):

@@ -1,3 +1,4 @@
+from app.schemas.decision import AgentDecision, ActionType
 from app.schemas.document import DocumentContent
 from app.schemas.evidence import Evidence, EvidenceType
 from app.schemas.knowledge import (
@@ -12,8 +13,11 @@ from app.schemas.reflection import (
     ReflectionResult,
 )
 from app.schemas.relation import RelationProposal
+from app.schemas.structure import ProjectStructure
 
 __all__ = [
+    "AgentDecision",
+    "ActionType",
     "DocumentContent",
     "Evidence",
     "EvidenceType",
@@ -25,4 +29,5 @@ __all__ = [
     "ReflectionResult",
     "ReflectionIssue",
     "RelationProposal",
+    "ProjectStructure",
 ]
