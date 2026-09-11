@@ -58,6 +58,23 @@ Tool 选择原则：
 当当前 Evidence 已经足以支撑后续生成 KnowledgeProposal，
 并且没有明显的关键缺口时，就应该选择 "finish"。
 
+## 如果这是一次重跑
+
+Context 里可能出现 `## Previous Proposal` 与 `## Reflection Result` 两段 ——
+那说明上一轮已经生成过提案，Reviewer 审查后指出了问题，现在要补。
+
+这时 `## Reflection Result` 里的 issues 就是**当前最明确的信息缺口**，
+优先级高于你自己重新判断出来的缺口：
+
+1. 逐条看 issues：每条都指明了一个 field 和问题类型，那就是缺什么。
+2. 优先选择能补上这些缺口的 Tool —— 先 search_code 定位相关代码，
+   再用 get_file 读实现。
+3. 不要因为「上一轮已经调查过」就跳过：上一轮的 Evidence 支撑不住那个结论，
+   才会被审查出来。缺口还在，就得继续补。
+4. issues 处理得差不多了，再按常规判断选择 "finish"。
+
+没有这两段（第一次跑），或者 issues 为空时，忽略本节，按上面的常规判断来。
+
 你的输出必须符合 AgentDecision：
 
 - action：只能是 "tool_call" 或 "finish"
@@ -129,6 +146,29 @@ Evidence 的编号就是「已收集的 Evidence」里每条开头的 [n]，直�
 7. learning_points 也必须来自这个项目的实际做法，不要写成放之四海皆准的套话。
 
 architecture.pattern 如果确实没有依据，就留空字符串，不要为了填满它反复纠结。
+
+## 如果这是一次重跑
+
+Context 里可能出现 `## Previous Proposal` 与 `## Reflection Result` 两段 ——
+那说明上一轮已经生成过提案，Reviewer 审查后指出了问题。
+
+这时你的任务**不是**重新写一份提案，而是**逐条处理** `## Reflection Result`
+里的 issues：
+
+1. **每一条 issue 都要处理，不能跳过。** issue 指向哪个 field，就改哪个 field。
+2. 按问题类型处理：
+   - factual_error：上一版写错了。以 Evidence 为准，改成正确的说法。
+   - unsupported_claim：结论没有依据。要么在 Evidence 里找到依据，
+     要么**删掉或弱化**这条结论 —— 不要留下一个找不到依据的结论。
+   - missing_evidence：依据不足，处理同上。
+   - contradiction：Evidence 之间互相矛盾。如实反映这个矛盾，
+     不要替它们挑一个。
+3. issues 没提到的字段：上一版是对的、Evidence 仍然支持的，就沿用。
+4. **不要原样重复上一版** —— 那等于这轮重跑没有发生。
+5. 某条 issue 确实无法用现有 Evidence 解决时，宁可弱化或删掉相关结论，
+   也不要为了「看起来完整」把它留下。
+
+没有这两段（第一次跑），或者 issues 为空时，忽略本节。
 
 只输出一个 ProposalDraft。
 """

@@ -11,6 +11,12 @@ Evidence 的排布顺序沿用 state.evidence 的收集顺序（先 metadata 后
 
     build_context            State                调查阶段：Evidence 够不够
     build_reflection_context Proposal + Evidence  反思阶段：提案站不站得住
+
+build_context 会按顺序渲染三段：Evidence、上一轮 Proposal、Reflection Result。
+后两段只在对应字段非空时出现 —— 第一次跑时 State 里两者都是 None，渲染出来的
+就只有 Evidence，与从前一致。它们是为「重跑」准备的：Agent 因此能看见自己上一版
+写了什么、Reviewer 又指出了哪些问题，进而针对 Issue 去补证据，而不是把上一版
+原样再生成一遍。
 """
 
 import json
@@ -18,6 +24,7 @@ import json
 from app.graph.state import KnowledgeProcessState
 from app.schemas.evidence import Evidence
 from app.schemas.knowledge import KnowledgeProposal
+from app.schemas.reflection import ReflectionResult
 
 # 单条 Evidence 放进 Context 的长度上限。真实仓库的 README / 源码动辄几万字符，
 # 直接塞进 Prompt 会撑爆上下文；截断只影响「给 LLM 看多少」，不影响 state 里
@@ -49,8 +56,35 @@ _EVIDENCE_HEADER = "## 可用的 Evidence"
 
 
 def build_context(state: KnowledgeProcessState) -> str:
-    """把 state.evidence 渲染成给 LLM 看的 Context 文本。"""
-    return _render_evidence_list(state.evidence)
+    """把 State 渲染成给 Knowledge Agent 决策 / 提案用的 Context。
+
+        固定顺序：Evidence → Previous Proposal → Reflection Result
+
+    后两段只在字段非空时追加。第一次跑时 State 里 proposal 与 reflection_result
+    都是 None，Context 里就只有 Evidence —— 和接入 Reflection 之前完全一样，所以
+    「首轮行为不变」不需要额外的开关来保证。
+
+    顺序是刻意的：证据在前，Agent 读到的第一件事仍然是事实；提案与反思在后，
+    以「上一轮的结论，待修正」的姿态出现。
+
+    长度上限只作用在 Evidence 上（见 _render_evidence_list）。Proposal 与
+    Reflection Result 不截断 —— 前者是待修正的对象，后者是必须被逐条处理的
+    行动清单，任何一段被截掉都会让 Agent 把「没看到」当成「不存在」，从而漏掉
+    该补的证据。两者内嵌的 Evidence 正文都已被压成 location（见 _render_proposal
+    与 _render_reflection_result），所以不截断也不会撑爆额度。
+    """
+    sections = ["## Evidence\n" + _render_evidence_list(state.evidence)]
+
+    if state.proposal is not None:
+        sections.append("## Previous Proposal\n" + _render_proposal(state.proposal))
+
+    if state.reflection_result is not None:
+        sections.append(
+            "## Reflection Result\n"
+            + _render_reflection_result(state.reflection_result)
+        )
+
+    return "\n\n".join(sections)
 
 
 def build_reflection_context(
@@ -100,9 +134,9 @@ def _render_proposal(proposal: KnowledgeProposal) -> str:
     """Proposal → 文本，内嵌的 evidence 只留出处。
 
     提案里每个字段自己带 evidence（Feature / Technology / Architecture 都有），
-    正文在上面「可用的 Evidence」里已经逐条列过，再嵌一遍是重复占额度。留
-    location 是为了让 LLM 看得出提案声称引用了哪些证据 —— 声称引用了、实际
-    支撑不住，正是 Reflection 要抓的东西。
+    正文在 Evidence 段里已经逐条列过，再嵌一遍是重复占额度。留 location 是为了
+    让 LLM 看得出提案声称引用了哪些证据 —— 声称引用了、实际支撑不住，正是
+    Reflection 要抓的东西，而重跑时 Agent 也得看见自己上一版引的是哪几条。
 
     ensure_ascii=False：这些内容大多是中文，转义成 \\uXXXX 只是白烧 token。
     """
@@ -113,6 +147,24 @@ def _render_proposal(proposal: KnowledgeProposal) -> str:
     for technology in data["technologies"]:
         technology["evidence"] = _citations(technology["evidence"])
     data["architecture"]["evidence"] = _citations(data["architecture"]["evidence"])
+
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _render_reflection_result(result: ReflectionResult) -> str:
+    """ReflectionResult → 文本，每条 Issue 的证据只留出处。
+
+    和 _render_proposal 同一个理由：证据正文在 Evidence 段里已经列过，再嵌一遍
+    是重复占额度。Reflection 的价值在于「结论可回溯到证据」，留 location 就够
+    Agent 看出 Reviewer 指的是哪一条 —— 它要据此决定去补什么证据。
+
+    description 与 summary 原样保留：那是 Reviewer 要说的话，是这份反馈的主体，
+    压缩它就等于把反馈本身弄丢。只有 evidence 字段被压成 location。
+    """
+    data = result.model_dump()
+
+    for issue in data["issues"]:
+        issue["evidence"] = _citations(issue["evidence"])
 
     return json.dumps(data, ensure_ascii=False, indent=2)
 
