@@ -101,6 +101,14 @@ class KnowledgeAgent:
             document_to_evidence(get_readme(self.owner, self.repo)),
         )
 
+    def run_once(self,state: KnowledgeProcessState) -> KnowledgeProcessState:
+
+        # 重新调用tool要重置count数
+        state = state.model_copy(update={"tool_call_count": 0})
+
+        state = self.investigate(state)
+        return self.generate_proposal(state)
+
     def run(self) -> KnowledgeProcessState:
         """完整流程：采集 → 调查 → 生成提案。
 
@@ -109,9 +117,10 @@ class KnowledgeAgent:
         自身不含任何逻辑，只是把三步串起来。后两步都要 LLM，所以没配 LLM 时
         会在那一步报错；只想要采集结果就调 initialize_state()。
         """
+
         state = self.initialize_state()
-        state = self.investigate(state)
-        return self.generate_proposal(state)
+        return self.run_once(state)
+
 
     def build_context(self, state: KnowledgeProcessState) -> str:
         """把 State 中已有的 Evidence 组织成交给 LLM 的 Context。"""
