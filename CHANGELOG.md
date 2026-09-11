@@ -1,5 +1,83 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.10] - 2026-09-11
+
+## KnowledgeAgent.run_once()
+- 抽出 `run_once(state)`：只跑「investigate → generate_proposal」两步，接收已有 State、返回新 State，调用方因而可以拿它当一个节点用
+- `run()` 改为 `initialize_state() + run_once()`，行为不变（仍是采集 → 调查 → 提案）
+- `run_once()` 进入时把 `tool_call_count` 归零：同一个 State 被重复处理时，上一次用掉的额度不该继续占着，否则第二轮 `investigate()` 会直接停在 0 次调用。这一条正是后面 `workflow` 重试回路的前提
+- 不含任何循环与路由，循环仍只在 `investigate()` 里
+
+## Graph 层节点（app/graph/nodes.py）
+- 新增 `app/graph/nodes.py`，把已有组件接到 State 上，让它们能被当成「一步」来调用：
+  - `knowledge_node`：`State → KnowledgeAgent.run_once → State(proposal, status="analyzing")`
+  - `reflection_node`：`State → ReflectionReviewer.run → State(reflection_result)`
+- 节点是「一步」不是循环：Tool Calling Loop 仍在 `KnowledgeAgent.investigate()` 里，重试与路由都不在这个模块
+- **不 import langgraph**：LangGraph 的节点本就是「收 State、返回 State 更新」的函数，写了也用不上（本版之前项目还没装 langgraph），没必要让它背一个包
+- 装配方式统一为「llm 关键字注入，省略时按 .env 现建」：`node(state)` 仍是合法调用，测试传 `FakeLLM` 即可全程不碰网络。没有做成「注入 agent 实例」—— 节点的入参是 State，State 里已经有 source，再要求调用方另建一个 Agent 传进来，等于把同一份信息拆到两个地方维护
+- `knowledge_node` 从 `state.source.url` 反解 owner/repo（走 `ghrepo`，与 `main.py` 同一套规则）。用手写 split 对残缺地址会静默产出垃圾值（见 1.0.9），这里不重蹈
+- `knowledge_node` **不含采集**：`run_once()` 是 `initialize_state()` 之后的两步。一个只有 `process_id + source` 的空 State 喂进去会落成 `failed`（没有 Evidence，`generate_proposal()` 的既有约定），接图时必须先过 `initialize_state()`
+- `reflection_node` 的 status 落成 `"reflecting"`，**不**按 `passed` 前进到 `persisting` 或回头重跑 —— 那是路由的事。路由看 `reflection_result.passed`，不该由「执行反思」这个动作替它做主
+- 失败处理分两类：`proposal is None` 时落成 `failed` 而不抛错（这是可预期的域内条件，与 `generate_proposal()` 在「没有 Evidence」时的处理一致）；LLM 输出过不了 schema 校验或引用了不存在的编号则**直接抛**（沿用 `ReflectionReviewer` 的约定 —— `ReflectionResult` 里没有 error 字段，无处安放失败态，而且这两类异常都说明 LLM 的输出该被看见）
+
+## Reflection 结果回喂 Knowledge Agent
+- 此前反馈是断的：`reflection_node` 把结果写回 `state.reflection_result` 之后就没有下文，而 `build_context()` 只渲染 evidence，Agent 根本看不见审查意见。这一节把这条通路接上
+- `graph/context.py` 的 `build_context()` 改为按固定顺序渲染三段：**Evidence → Previous Proposal → Reflection Result**，后两段仅在对应字段非空时追加
+  - 首轮 `proposal` 与 `reflection_result` 皆为 `None`，渲染结果与从前完全一致 ——「首轮行为不变」不需要额外的开关来保证
+  - 顺序是刻意的：证据在前，Agent 读到的第一件事仍然是事实；提案与反思在后，以「上一轮的结论，待修正」的姿态出现
+  - Evidence 段**复用** `_render_evidence_list()`，没有内联：截断与编号规则只该有一处，`build_reflection_context()` 也在用同一个函数
+  - Proposal 与 Reflection 段内嵌的 Evidence 正文压成 `location`（复用 `_citations`）：正文在 Evidence 段已逐条列过，重复三遍会把 Agent 的上下文挤满，反而看不见新证据
+  - 长度上限只作用在 Evidence 上；Proposal 与 Reflection **不截断** —— 前者是待修正的对象，后者是必须逐条处理的行动清单，截了会让 Agent 把「没看到」当成「不存在」，漏掉该补的证据
+  - 新增 `_render_reflection_result()`：`description` / `passed` / `summary` 原样保留（那是反馈的主体，压缩它就等于把反馈本身弄丢），只有 `evidence` 压成 location
+- `agents/prompts.py` 为两条 Agent 提示词各加「如果这是一次重跑」一节：
+  - `DECISION_SYSTEM_PROMPT`：Context 里出现这两段时，把 issues 当作**优先级最高的信息缺口**，优先选能补上它的 Tool（`search_code` 定位 → `get_file` 读实现），不要因为「上一轮已调查过」就跳过 —— 上一轮的 Evidence 支撑不住那个结论才会被审查出来
+  - `PROPOSAL_SYSTEM_PROMPT`：逐条处理 issue，按 `factual_error` / `unsupported_claim` / `missing_evidence` / `contradiction` 四类分别处置，明说**不要原样重复上一版**（那等于这轮重跑没有发生）
+  - 两节都是**条件生效**：「没有这两段（第一次跑），或者 issues 为空时，忽略本节」。所以接入 Reflection 之后首轮行为仍然完全不变
+  - `REFLECTION_SYSTEM_PROMPT` 一个字未动
+- `build_reflection_context()` 保持原样 —— 那是 **Reviewer 自己的输入**（Proposal 在前、Evidence 在后，且 Proposal 不截断），与回喂给 Agent 的这条路是两件事，合并不但没必要，还会同时破坏「先看结论再核依据」和「先看事实」这两个刻意的顺序
+- 因为 `build_context()` 被 `decide()` 与 `generate_proposal()` **两处**共用，接通后**调查决策**和**提案生成**都能看见反馈：`decide()` 可以据此挑一个 Tool 去补缺口
+
+## LangGraph 外层流程（app/graph/workflow.py）
+- 新增 `app/graph/workflow.py`，把 `initialize → knowledge → reflection → retry/pass` 串起来：
+  - `build_workflow(owner, repo, *, llm=None)`：组装并 `compile()`。`llm` 在 build 时解析一次，两个节点共用同一个实例
+  - `route_after_reflection(state)`：纯路由，返回 `"pass"` / `"retry"` / `"failed"`。不改 State、不调 Agent、不调 LLM、不执行循环
+  - `prepare_retry(state)`：只做 `iteration_count += 1`，返回新对象
+  - `MissingReflectionResultError`：走到路由时 `reflection_result` 仍为 `None` 时抛（仓库存量风格：`NotAToolCallError`、`EvidenceReferenceError` 也是模块级 `RuntimeError`）
+- 职责按「决定去哪 / 修改 State / 真正执行」三分：`route_after_reflection` 决定去哪，`prepare_retry` 只改 State（**不**在这调 KnowledgeAgent，否则重试轮次就记不清了），`knowledge_node` 真正再跑一轮
+- **循环靠 conditional edge 构成，代码里没有 while**
+- **重试复用同一个 State**：路径是 `reflection → prepare_retry → knowledge`，`prepare_retry` 只动 `iteration_count`，**不清 `reflection_result`**（清了 `build_context` 就交不出反馈，Agent 等于闭眼重跑），更不回头调 `initialize_state()` —— 那会新建 `process_id` 与空 evidence，上一轮的证据全丢，而 Issue 恰恰要靠这些证据解决
+- **路由必须先看 `status` 再看 `passed`，否则死循环。** 这条路径实际可达，不是理论风险：
+  ```text
+  第 1 轮: knowledge 成功 → reflection 判 passed=False          （reflection_result 留下，passed=False）
+  第 2 轮: knowledge 失败 → status="failed"，proposal=None
+                             但 _failed() 只把 proposal 置回 None，不动 reflection_result
+          → reflection_node: proposal 为 None，直接返回，不调 LLM、也不改 reflection_result
+          → status="failed" 与上一轮的 passed=False 同时在手
+  ```
+  若先看 `passed` 就会判成 `"retry"`，把已失败的 State 再喂回 Knowledge，往复直到撞上 `recursion_limit`
+  → 因此路由多了一条 `"failed": END` 边。失败态作为**数据**交给调用方，与 `main.py` 先看 `status`/`error`、`generate_proposal()` 失败不抛错的既有约定一致
+- 真正的语义边界：不落库、不建关系、不做 embedding、不实现 Relation Agent、不改 proposal / evidence。Reflection 判 pass 只是「提案站得住」，**不代表已经持久化**
+
+## 依赖
+- `requirements.txt` 新增 `langgraph>=1.2`（实测 1.2.11）。此前未装，`workflow.py` 无法 import
+- 顺带补上 1.0.9 遗留的 `.venv` 缺包：`ghrepo` 装了但没装全（走的是同一条 `pip install -r requirements.txt`）
+
+## tests
+- **本版未新增测试**，全量仍 72 passed（`context.py` / `prompts.py` 的改动没有破坏任何既有测试，`build_context()` 的首轮行为也由「首轮 = 只有 Evidence」这一实测确认未变）
+- 已做的人工验证（临时脚本，未落盘）：
+  - `build_context`：首轮只渲染 Evidence 且编号从 1 起；重跑时三段齐全、顺序正确；Proposal / Reflection 段内嵌证据只留 location、正文不重复；截断只作用于 Evidence
+  - 反馈闭环：`knowledge → reflection(FAIL) → knowledge` 重跑时，`decide()` 的 prompt 里确实出现了 `## Previous Proposal`、`## Reflection Result`、Reviewer 的问题描述与问题类型
+  - `workflow`：PASS 路径 `iteration_count=0`；RETRY 路径 `iteration_count=1` 且 **evidence 条数不变**（证明没重建 State）、重跑时能看到反馈；FAILED 路径正确停在 END 不死循环；`route_after_reflection` 四种输入（passed / 非 passed / status=failed / None 抛错）逐一验过；`prepare_retry` 只动 `iteration_count`、不碰 evidence 与 reflection_result、不改入参
+- **仍未验证**：全程用 `FakeLLM`，脚本写什么就出什么。所以「真实 LLM 能否审出问题」「能否照着重跑段去补证据」都没有被验证 —— 这两件需要真实 LLM 客户端跑一遍才算数（1.0.9 也留了同样的缺口）
+
+## 待接
+- **重试没有上限。** `iteration_count` 由 `prepare_retry` 累加，但 State 里没有「最多几次」这个字段，本版**未改 Schema**。若 LLM 一直判 `passed=False` 就会一直重跑，目前唯一兜底是 LangGraph 自带的 `recursion_limit`（默认 25），超了抛 `GraphRecursionError`。要真正限次有两条路，都要先定 Schema：State 加 `max_iterations`（语义完整、可配置），或 `workflow.py` 里比一个模块级常量（不动 Schema，但配置散在图里）
+- **`build_workflow` 的 seed State 有点别扭。** LangGraph 的输入必须是合法完整的 State（`process_id` / `status` 必填，实测只给 `source` 会 `ValidationError`），而 `initialize_state()` 是**构造器不是变换器** —— 它自己生成 `process_id`、自己按 owner/repo 拼 source，不接收也不沿用入参。所以调用方为满足校验传的 seed 会被整个丢掉，**seed 的 source 被静默忽略**：研究哪个仓库由 `build_workflow` 的参数决定，两者不一致时没有任何提示。这是目前最容易踩的坑
+- `app/graph/__init__.py` 未导出 `nodes` / `workflow`，调用方目前从 `app.graph.workflow` 直接 import
+- `app/graph/node.py`（单数）是个空的未跟踪文件，与本版的 `nodes.py` 容易混，未处理
+- `main.py` 仍是单轮 `agent.run()`，没有接 `build_workflow()`；`Workflow` 目前只有测试/脚本在调
+- 未实现（设计文档范围之外）：Relation Agent、数据库持久化、pgvector / Embedding、RAG、API、多 Agent
+
 ## [1.0.9] - 2026-09-10
 
 ## Reflection（Evidence-grounded Reviewer）
