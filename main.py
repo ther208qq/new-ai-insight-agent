@@ -1,15 +1,21 @@
 """本地跑一遍 Knowledge Agent 全链路。
 
-    python main.py [owner] [repo]
+    python main.py [仓库地址 | owner repo]
 
-不传参数就用 example/demo-project —— 底层 Tool 目前全是 mock 数据，不访问
-GitHub，所以 owner/repo 填什么都不影响结果（只影响 State.source.url 和提案的
-title）。
+不传参数就用 example/demo-project。仓库地址支持 https://github.com/owner/repo、
+git@github.com:owner/repo.git 这类写法，也支持直接写 owner/repo。
+地址解析交给 ghrepo（见 GHRepo.parse），它只认纯粹的仓库地址：像
+https://github.com/owner/repo/tree/main 这种子页面地址会被判为非法。
+
+底层 Tool 目前全是 mock 数据，不访问 GitHub，所以 owner/repo 填什么都不影响
+结果（只影响 State.source.url 和提案的 title）。
 
 需要项目根目录下有 .env（照 .env.example 填），否则这里报 ConfigError。
 """
 
 import sys
+
+from ghrepo import GHRepo
 
 from app.agents.knowledge_agent import KnowledgeAgent
 from app.config import ConfigError
@@ -25,8 +31,22 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    owner = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_OWNER
-    repo = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_REPO
+    args = sys.argv[1:]
+
+    if not args:
+        owner, repo = DEFAULT_OWNER, DEFAULT_REPO
+    else:
+        # 一个参数既可以是完整地址，也可以是 owner/repo；两个参数是老写法。
+        # 都先拼成 "owner/repo" 再解析，省得多一套分支。
+        raw = args[0] if len(args) == 1 else "/".join(args[:2])
+        try:
+            ref = GHRepo.parse(raw)
+        except ValueError as error:
+            print(f"仓库地址有问题：{error}")
+            return 1
+
+        # GHRepo 的字段叫 name 不叫 repo，别顺手写错。
+        owner, repo = ref.owner, ref.name
 
     try:
         llm = create_llm_client()

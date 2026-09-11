@@ -1,5 +1,48 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.9] - 2026-09-10
+
+## Reflection（Evidence-grounded Reviewer）
+- 新增 `app/agents/reflection.py`：`ReflectionReviewer(llm).run(proposal, evidence) → ReflectionResult`。职责只有一件 —— 检查 KnowledgeProposal 里的事实性内容能否被已有 Evidence 支持
+- 范围上它是 `generate_proposal()` 的镜像：那个是「Evidence → 提案」，这个是「提案 + Evidence → 审查」。两者的输入都只有数据、输出都只有结构，都不碰 Tool
+- **它不是 Agent**，也不该长成 Agent：不持有 Tool、不调 Tool、不做 Tool Calling Loop、不获取新 Evidence（不去外面找）、不修改也不重新生成 Proposal、不决定下一步 Workflow。证据不足时只记录 Issue，把 Issue 反馈给 Knowledge Agent 是外层 Workflow 的事（本阶段不实现）
+- `llm` 必填，没照抄 `KnowledgeAgent` 的 `llm=None` 可选写法 —— 那个可选的依据是「采集阶段不需要 LLM」，这个理由在 Reflection 不成立（它从头到尾只有「问 LLM」这一件事）
+- 输入只要 `KnowledgeProposal` + `list[Evidence]`，**不接 State**（设计文档明确要求，不把整个 State 传给 LLM）
+- 不写回 `state.reflection_result`（本次只实现 Reflection 本体，写回属于外层 Workflow）
+- 新增 `REFLECTION_SYSTEM_PROMPT`：逐项检查 title / summary / problem / core_features / technologies / architecture / learning_points；语义等价即算得到支持（不要求逐字一致）；明确「不要过度挑刺，你不是语法检查器」；明确「Evidence 不足时宁可 FAIL，不要用你自己的知识补缺口」
+- Prompt 里**不提 `low_quality`**：`IssueType` 枚举里有它，但设计文档的判定标准只用四种（factual_error / unsupported_claim / missing_evidence / contradiction），所以不引导 LLM 去用。枚举本身未动
+- 「某个 claim 该判哪一类 Issue」完全由 LLM 判断，代码不做二次推断（有测试钉住）
+
+## Reflection 的 Evidence 引用（LLM 不许填 Evidence 正文）
+- 新增 `schemas/reflection.py` 的 `DraftReflectionIssue` / `ReflectionDraft`：LLM 侧的输出结构，与 `ReflectionResult` 只差一处 —— `issues[].evidence` 是 `list[int]` 编号而不是 `list[Evidence]`。**现有 `ReflectionIssue` / `ReflectionResult` 未做任何改动**
+- 为什么不让 LLM 直接输出 `ReflectionResult`：那个 schema 的 evidence 是完整 `Evidence` 对象，四个字段全是自由文本，LLM 完全可以写出一份输入里根本不存在的证据，而 schema 一个都校验不出来。Reflection 的价值就在于「结论可回溯到证据」，那样就没了 —— 和 `ProposalDraft` 挡掉的是同一类问题，只是后果更严重
+- 新增 `app/graph/reflection.py`：`build_reflection_result(draft, evidence)` —— 纯函数，把编号换回输入 evidence 的原文。编号从 1 开始（与 context.py 一致），越界**报错而不静默跳过**：编号对不上说明 LLM 在编造引用
+- 异常复用 `graph/proposal.py` 的 `EvidenceReferenceError`，不另定义同义异常
+- 新增 `graph/context.py` 的 `build_reflection_context(proposal, evidence)`：Proposal 在前（先看结论再核依据）、Evidence 在后；**长度上限只作用在 Evidence 上，Proposal 不截断** —— 提案正是被审查的对象，看一半会让 LLM 把「没截到」当成「不存在」，报出一堆假问题
+- Proposal 段里每个字段自带的 evidence 只保留 `location`，正文不重复出现（正文在「可用的 Evidence」段已逐条列过）
+- `graph/context.py` 把 `build_context()` 的函数体抽成私有的 `_render_evidence_list()`，两个入口共用 —— 截断规则与编号规则只该有一处，否则「给 LLM 看多少」会随调用点漂移。**`build_context()` 行为零变化**（原 56 个测试全过）
+- LLM 输出过不了 schema 校验（`ValidationError`）或引用编号越界时**直接抛出**，不兜成「审查失败」：`ReflectionResult` 里没有 error 字段，没有地方安放失败态。外层 Workflow 怎么处理（重试 / 落成 failed State），等实现它时再定
+
+## 仓库地址解析（改用 ghrepo）
+- `main.py` 现在接受 `python main.py [仓库地址 | owner repo]`，支持 `https://github.com/owner/repo`、`git@github.com:owner/repo.git`、`owner/repo` 三种写法
+- 解析交给 `ghrepo` 的 `GHRepo.parse()`（`requirements.txt` 新增 `ghrepo>=0.7`，零依赖）。用 `parse()` 而不是 `parse_url()`：前者同时吃 URL 和裸的 `owner/repo`，正好覆盖入口的两种入参形式
+- 注意 `GHRepo` 的字段叫 `name` 不叫 `repo`
+- **此前手写版本的问题**：先按 `/` 切开取最后两段，对残缺地址会静默产出垃圾数据 —— `https://github.com/` 得到 `owner="https:", repo="github.com"`，`github.com/owner` 得到 `owner="github.com", repo="owner"`，`len(segments) < 2` 那个兜底拦不住（段数是够的，只是前面混进了 scheme 和域名），错值会一路传到 `state.source.url` 和提案标题。ghrepo 对这两种输入直接抛 `ValueError`，现在入口会打印「仓库地址有问题」并以退出码 1 结束
+- 已知限制：`ghrepo` 只认纯粹的仓库地址，`https://github.com/owner/repo/tree/main` 这类从子目录页复制的地址会被判为非法（要支持需自己先剥掉 `/tree/` 之后的部分，本次未做）
+
+## 依赖修复
+- `.venv` 缺 `python-dotenv` 与 `openai`（`requirements.txt` 里写了但没装），导致 6 个测试文件卡在 collection 阶段、整套测试跑不起来。已 `pip install -r requirements.txt` 补上
+
+## tests
+- 新增 tests/test_reflection.py（16）：设计文档第十一节的五个 Test（全通过 / 事实错误 / 无证据 / Evidence 冲突 / 不调 Tool），加装配关系（编号回填的是输入原文，用 `is` 做同一性断言；编号从 1 起；多条 issue 各自回填；Issue 类型原样来自 LLM；用的是 reflection 自己的 prompt；Context 里 proposal 与 evidence 都在）与边界（引用不存在的编号报错、LLM 输出不合法抛 `ValidationError`、Proposal 不参与截断、Proposal 内嵌证据只留出处、不修改传入的 proposal 与 evidence）
+- 「不调 Tool」那个测试除了 monkeypatch `call_tool` 让它炸，还断言 `app.agents.reflection` 模块**根本没导入 Tool** —— 证明是「不可能调」而不是「碰巧这条路径没调到」
+- 全量 72 passed（原 56 + 新 16）
+- 仍未验证：FakeLLM 的草稿是脚本写死的，所以「LLM 能否真正审出问题」没有被验证 —— 判定标准是否好用，需要真实 LLM 客户端
+
+## 待接
+- `ReflectionReviewer` 目前只有测试在调，`main.py` 里还没接；`state.reflection_result` 无人写入
+- 未实现（设计文档第十二节明确排除）：Knowledge Agent 重试、LangGraph 外层循环、Relation Agent、数据库、Embedding、RAG、新 Tool、多 Agent
+
 ## [1.0.8] - 2026-09-10
 
 ## 接入真实 LLM（OpenAI 兼容端点 + .env 配置）

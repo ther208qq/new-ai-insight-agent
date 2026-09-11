@@ -2,6 +2,7 @@
 pydantic>=2.13
 python-dotenv>=1.0
 openai>=3.0
+ghrepo>=0.7
 
 # 开发 / 测试
 pytest>=9.0
