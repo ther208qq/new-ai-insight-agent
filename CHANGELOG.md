@@ -1,5 +1,45 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.11] - 2026-09-11
+
+## 日志模块（app/logging.py）
+- 新增 `app/logging.py`：`get_logger(name)` / `configure_logging(settings=None, *, level=None, stream=None)`，用标准库 `logging`，**不引任何第三方日志库**
+- 定位是**调试追踪**而不是审计流：单行文本、时间只到秒（`datefmt="%H:%M:%S"`）、默认写 **stderr**。stdout 留给 `main.py` 的中文报告 —— 那是运行结果，日志是过程，混在一起就没法 `python main.py > out.txt` 了
+- logger 名分层：`get_logger("agent.knowledge")` → `ai_insight.agent.knowledge`，一条 `LOG_LEVEL` 设在 `ai_insight` 这一层就控制全部（子 logger 的 level 都是 `NOTSET`，向上继承）。**刻意不用 `__name__`**：那样树根会叫 `app`、名字里还带着文件名，看不出「哪一层在说话」。粒度约定是「一个模块一个 logger」，不要细到函数
+- 级别**必须设在 logger 上**，不能只设 handler 的级别：级别检查发生在记录进入任何 handler **之前**，未 configure 时 `ai_insight` 的 effective level 继承 root 的 `WARNING`，INFO 会被提前丢掉，handler 再宽松也收不到
+- **幂等**：重复 `configure_logging` 只摘掉自己装过的 handler（靠 `_OWN_HANDLER_MARK` 标记属性识别）再装新的，不会叠加。**刻意不用 `logger.handlers.clear()`**—— pytest 的 handler、宿主程序自己加的都挂在同一棵树上，clear 会把它们一起干掉，表现为「测试里的日志断言莫名消失」。也**不调 `logging.basicConfig()`**：它动的是 root，且 root 已有 handler 时静默什么都不做，格式就悄悄不生效了
+- `configure_logging` **自己不读 env**：默认级别是常量 `INFO`，要按 .env 配就由调用方传 `load_log_settings()`（`main.py` 那一行）。读 env 的只有 `load_*_settings`，装配的只有 `configure_*` —— 和 `load_llm_settings` / `create_llm_client` 的分工一致。这样测试里 `configure_logging(level="DEBUG")` 就是全部，不必 monkeypatch 环境变量，也不会因为某台机器 `.env` 写了 `LOG_LEVEL=DEBUG` 而让断言忽明忽暗
+- 静音靠 `level="CRITICAL"`（本项目不打 CRITICAL，等于关掉），不再加一个 `enabled` 开关 —— 少一个概念
+- 默认用 `sys.stderr` 时顺手 `reconfigure(encoding="utf-8", errors="replace")`：中文日志撞上 GBK 控制台会抛 `UnicodeEncodeError`，被 logging 自己的异常处理吞成一行 `--- Logging error ---`。与 `main.py` 对 stdout 的处理同一个理由、同样先 `hasattr`（pytest 会换掉 `sys.stderr`）。调用方显式传了 `stream` 就不碰全局
+- 文件名叫 `logging.py` **不产生遮蔽**：绝对导入（PEP 328）下 `app/` 里任何 `import logging` 拿到的都是标准库（本模块第一行也正是它）。唯一能遮蔽的场景是「在 `app/` 目录里跑脚本」，本项目两个入口都从项目根跑。先例：`flask/logging.py`
+- 级别名清单写死在 `config.LOG_LEVELS`，不用 `logging.getLevelNamesMapping()` —— 那个 3.11 才有，本项目是 3.10
+- 抓日志不需要自定义 handler：`configure_logging(stream=io.StringIO())` 就够，测试因此走的是公开 API
+
+## 打点接入（6 个文件）
+- 级别的一致原则：**INFO** = 运行轨迹的骨架，默认可见（删掉这行就看不出发生了什么）；**WARNING** = 轨迹完整，但信息/能力被丢掉（降级、截断、达到上限、失败态、LLM 乱指名 Tool）；**DEBUG** = 排障才需要的细节；**ERROR 不用** —— 异常一律上抛，traceback 自带完整信息，再记一条等于把同一次失败说两遍
+- 另一条是**去重**：同一件事实只在能拿到最多信息的那一层打一次
+- `tools/registry.py`（Tool 执行的唯一收口点，所以只在这里打一处，不逐个 Tool 文件打）：调用前 INFO 记 Tool 名 + 参数 + 仓库；未知 Tool 与两处参数校验失败在 raise 前各留一条 WARNING；`owner/repo` 被 State 覆盖是刻意的，但 LLM 到底写了什么值得留痕（DEBUG，且**必须在覆盖之前**判断，覆盖之后就看不出来了）
+- `agents/knowledge_agent.py`：每轮决策 INFO（同时带内层 `tool_call_count + 1` 和外层 `iteration_count` —— 两个计数说的不是一回事）、Tool 结果入库 INFO（记的是转换成 Evidence 之后的样子）、finish INFO、**撞上 `MAX_TOOL_CALLS` 仍未 finish 记 WARNING**、提案成功 INFO、`_failed()` 里 WARNING（一处覆盖「没有 Evidence / LLM 输出不合 `ProposalDraft` / 引用了不存在的 Evidence 编号」三条失败路径）；`run_once()` 归零 `tool_call_count` 时补一条 DEBUG（只在真的归零了才记，首轮没额度可归、记了是噪音）
+- **撞上限那条 WARNING 是本轮最有价值的一处**：撞上限和「LLM 说够了」在 State 上长得一模一样（都是 `status="collecting"`），在此之前二者无法区分，而它正是「这份提案为什么没查透」的答案
+- `agents/reflection.py`：`passed=True` INFO、`passed=False` WARNING 并列出 issue 类型（那是重试的待办清单）。**`ValidationError` / `EvidenceReferenceError` 两条路径刻意不打点** —— 它们按设计直接抛（`ReflectionResult` 里没有 error 字段，无处安放失败态），异常一路冒到调用方、信息完整；为打点在外面包一层 `try/except ... raise` 会改变代码形状，并在「不吞异常」的既有约定旁边开一个口子
+- `graph/nodes.py`：`knowledge_node` 开始/完成各一条 INFO。**「第几轮」只在这里看得见** —— `iteration_count` 由 `workflow.prepare_retry` 累加，重试回路因此不必自己记日志，下一轮开始时会说。`reflection_node` 只在 `proposal is None` 落成 failed 时记 WARNING（`passed` 那个结论已在 `ReflectionReviewer` 里记过，且那边拿得到 issues）
+- `llm/openai_compatible.py`：三档降级每退一档记一条 WARNING（从哪档退到哪档 + 服务端原文压成一行、截前 200 字符）。**降级在此之前完全不可见**，而它正好解释了「为什么模型偶尔吐回需要 `_extract_json` 抠的文本」。每个进程只记一次（`_mode` 会记住，之后不再试探），符合它「一次性能力损失」而非「每次调用的噪音」的性质
+- `graph/context.py`：整段 Context 超长被截断记 WARNING（次数少、后果重 —— 后面的 Evidence LLM 完全看不到）；单条 Evidence 正文被截断记 DEBUG（真实 README 动辄上万字符，几乎必然触发，放 INFO 会把轨迹骨架淹掉）。两处都在 `_render_evidence*` 里，两个 Context 入口共用同一个截断点，所以日志不会重复实现
+- **`app/graph/workflow.py` 刻意不打点**：`prepare_retry` 想记的「iteration_count 0 → 1」已被 `nodes.knowledge_node` 覆盖，轨迹里不会留下空洞（`retry` 必有下一轮 knowledge、`failed` 必有 `_failed` 的 WARNING、`pass` 必有 `ReflectionReviewer` 的通过行）。`route_after_reflection` 因此保持纯函数 —— 它 docstring 明写「不改 State、不调 Agent、不调 LLM」，打点会引入全局可观察副作用，而它恰好承担着「failure 优先于 reflection_result」「None 要抛不要当 PASS」两条最易写错的不变量
+- 所有打点**只读不写**（`sorted(...)` / `len(...)` / 列表推导都是新建对象，没有一处对 state 或 arguments 赋值），也不打整份 `state`（pydantic 的 repr 虽无副作用，但会把整份 Evidence 写进 stderr），更不触发 LLM / Tool —— 所以「传入的 state 不会被修改」那批既有断言、以及「数 `llm.calls`」「数 evidence 条数」全部继续成立
+
+## 环境变量
+- 新增选填的 `LOG_LEVEL`（DEBUG / INFO / WARNING / ERROR / CRITICAL，默认 INFO），`.env.example` 已补
+- 与其他变量不同，**它不做必填检查**：没写 `.env`、甚至 `.env` 不存在（CI 就是），都回落到 INFO —— 日志级别猜一个总比「连日志都起不来」好。`_REQUIRED_ENV_VARS` 那条纪律要解决的是「缺了就跑不动的东西」，这里不适用
+- `LogSettings` / `load_log_settings()` 放在 `app/config.py`，与 `LLMSettings` / `load_llm_settings()` 同一形状；级别名归一化（`normalize_log_level()`）也放在那里，因为 `app/logging.py` 的 `_coerce_level()` 要复用它 —— 放 `logging.py` 会让两个模块互相 import。**大小写不敏感**是刻意的（`.env` 里写小写是常态），而 `Logger.setLevel()` 只认大写精确匹配
+- `main.py` 只在入口加一处 `configure_logging(load_log_settings())`；`LOG_LEVEL` 写错不拖垮整次运行，退回默认级别并说一声。**既有 12 处 `print` 一字未动** —— 那是对齐的中文报告，是「运行结果」，不是过程日志
+
+## 测试（tests/test_logging.py）
+- 新增 18 条测试：装配（幂等、不碰别人的 handler、默认不读 env、CRITICAL 静音、大小写、未知级别被拒、`get_logger` 无副作用）+ 接入点（Tool 调用、未知 Tool、每轮决策、撞上限、反思通过与未通过、两层截断、三档降级）+ 一条不变量（同一份 State 在 CRITICAL 与 DEBUG 下跑出的结果完全相同）
+- **不建 `conftest.py`、不加 fixture、不用 `caplog`**，与既有测试一致。用 `configure_logging(stream=io.StringIO())` 抓日志：`caplog` 抓的是 root（我们的日志挂在 `ai_insight` 上，多一个隐含前提），且 `caplog.set_level` 会改 logger 级别，恰好和「幂等」「默认级别」两组断言打架
+- **刻意不测 `load_log_settings`**：它内部调 `load_dotenv`，而那个函数直接往 `os.environ` 写值（不经过 monkeypatch），一测就会污染整个测试进程，破坏本仓库「测试不碰 `os.environ`」的性质。既有先例一致 —— `load_llm_settings` 至今也没有测试
+- 全量 90 passed（原 72 + 新 18）
+
 ## [1.0.10] - 2026-09-11
 
 ## KnowledgeAgent.run_once()

@@ -18,8 +18,9 @@ import sys
 from ghrepo import GHRepo
 
 from app.agents.knowledge_agent import KnowledgeAgent
-from app.config import ConfigError
+from app.config import ConfigError, load_log_settings
 from app.llm import create_llm_client
+from app.logging import configure_logging
 
 DEFAULT_OWNER = "example"
 DEFAULT_REPO = "demo-project"
@@ -30,6 +31,18 @@ def main() -> int:
     # 显示成问号，而不是抛 UnicodeEncodeError 把整次运行的结果吞掉。
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    # 日志只在这一处配置（幂等，重复调用不会叠加 handler）。级别来自 .env 的
+    # LOG_LEVEL —— configure_logging 自己不读 env，这一行把两者接上。
+    # 日志走 stderr，stdout 留给下面那份中文报告。
+    #
+    # LOG_LEVEL 写错不该把整次运行拖垮：退回默认级别继续，并说一声 —— 和下面
+    # 「先打印原因再 return 1」是同一种透明，只是这条不值得中断运行。
+    try:
+        configure_logging(load_log_settings())
+    except ConfigError as error:
+        print(f"LOG_LEVEL 有问题，改用默认级别：{error}")
+        configure_logging()
 
     args = sys.argv[1:]
 

@@ -22,9 +22,12 @@ build_context 会按顺序渲染三段：Evidence、上一轮 Proposal、Reflect
 import json
 
 from app.graph.state import KnowledgeProcessState
+from app.logging import get_logger
 from app.schemas.evidence import Evidence
 from app.schemas.knowledge import KnowledgeProposal
 from app.schemas.reflection import ReflectionResult
+
+logger = get_logger("graph.context")
 
 # 单条 Evidence 放进 Context 的长度上限。真实仓库的 README / 源码动辄几万字符，
 # 直接塞进 Prompt 会撑爆上下文；截断只影响「给 LLM 看多少」，不影响 state 里
@@ -125,6 +128,15 @@ def _render_evidence_list(evidence: list[Evidence]) -> str:
     text = "\n\n".join(blocks)
 
     if len(text) > MAX_CONTEXT_CHARS:
+        # 整段截断是一次真实的信息丢失（后面的 Evidence LLM 完全看不到），次数少、
+        # 后果重，所以是 WARNING；单条截断（见 _render_evidence）则是 DEBUG。
+        # 两个 Context 入口共用本函数，所以「给了 LLM 多少」这个事实只有这里在说。
+        logger.warning(
+            "Context 超长被截断：%d 字符 → %d，%d 条 Evidence 中后面的不再展示",
+            len(text),
+            MAX_CONTEXT_CHARS,
+            len(evidence),
+        )
         text = text[:MAX_CONTEXT_CHARS] + _CONTEXT_TRUNCATION_NOTICE
 
     return text
@@ -177,6 +189,15 @@ def _citations(evidence: list[dict]) -> list[str]:
 def _render_evidence(index: int, evidence) -> str:
     content = evidence.content.strip()
     if len(content) > MAX_EVIDENCE_CHARS:
+        # 单条截断在真实仓库里几乎必然发生（README 动辄上万字符），放 INFO 会把
+        # 轨迹的骨架淹掉，所以是 DEBUG；整段截断才是 WARNING（见 _render_evidence_list）。
+        logger.debug(
+            "Evidence 正文被截断：[%d] %s 的 %d 字符 → %d 字符",
+            index,
+            evidence.location,
+            len(content),
+            MAX_EVIDENCE_CHARS,
+        )
         content = content[:MAX_EVIDENCE_CHARS].rstrip() + _TRUNCATION_NOTICE
 
     return _EVIDENCE_TEMPLATE.format(

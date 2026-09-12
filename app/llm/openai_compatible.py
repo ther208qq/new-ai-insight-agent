@@ -30,6 +30,9 @@ from pydantic import BaseModel
 
 from app.config import LLMSettings
 from app.llm.client import TModel
+from app.logging import get_logger
+
+logger = get_logger("llm.openai")
 
 # 服务端拒绝 response_format 时，报错里一般会带上这几个词之一。
 _UNSUPPORTED_HINTS = ("response_format", "json_schema", "json mode", "json_object")
@@ -85,6 +88,17 @@ class OpenAIClient:
             except BadRequestError as error:
                 if not _looks_like_unsupported(str(error)):
                     raise
+                # 降级以前完全不可见：调用方只看得出「结构化输出没那么严了」，
+                # 看不出服务端拒了 response_format。这条也是「为什么模型偶尔吐回
+                # 需要 _extract_json 抠的文本」唯一的解释。
+                # 每个进程只记一次（_mode 会记住，之后不再试探）—— 正好符合它
+                # 「一次性能力损失」而不是「每次调用的噪音」的性质。
+                logger.warning(
+                    "LLM 结构化输出降级：%s → %s（服务端拒绝：%s）",
+                    _JSON_SCHEMA_MODE,
+                    _JSON_OBJECT_MODE,
+                    _brief(str(error)),
+                )
                 self._mode = _JSON_OBJECT_MODE
 
         if self._mode == _JSON_OBJECT_MODE:
@@ -93,6 +107,12 @@ class OpenAIClient:
             except BadRequestError as error:
                 if not _looks_like_unsupported(str(error)):
                     raise
+                logger.warning(
+                    "LLM 结构化输出降级：%s → %s（服务端拒绝：%s）",
+                    _JSON_OBJECT_MODE,
+                    _PROMPT_MODE,
+                    _brief(str(error)),
+                )
                 self._mode = _PROMPT_MODE
 
         return self._complete_with_prompt(system, user, response_model)
@@ -253,3 +273,15 @@ def _extract_json(text: str) -> str:
 def _looks_like_unsupported(message: str) -> bool:
     lowered = message.lower()
     return any(hint in lowered for hint in _UNSUPPORTED_HINTS)
+
+
+def _brief(text: str, limit: int = 200) -> str:
+    """把报错原文压成一行短句。
+
+    服务端的 400 经常带着一整段 JSON（把请求体原样回吐），而日志要的是
+    「为什么被拒」而不是那份请求体的全文。压空白 + 截断即可。
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit] + "…"

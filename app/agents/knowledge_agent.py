@@ -37,6 +37,7 @@ from app.graph.evidence import (
 from app.graph.proposal import EvidenceReferenceError, build_proposal
 from app.graph.state import KnowledgeProcessState, Source
 from app.llm.client import LLMClient, LLMNotConfiguredError
+from app.logging import get_logger
 from app.schemas.decision import AgentDecision
 from app.schemas.evidence import Evidence
 from app.schemas.knowledge import ProposalDraft
@@ -44,6 +45,7 @@ from app.tools.get_project_metadata import get_project_metadata
 from app.tools.get_readme import get_readme
 from app.tools.registry import call_tool
 
+logger = get_logger("agent.knowledge")
 
 MAX_TOOL_CALLS = 5
 
@@ -95,16 +97,30 @@ class KnowledgeAgent:
         )
 
         # 两个 Tool 的返回值由代码转成 Evidence
-        return record_evidence(
+        state = record_evidence(
             state,
             metadata_to_evidence(get_project_metadata(self.owner, self.repo)),
             document_to_evidence(get_readme(self.owner, self.repo)),
         )
 
+        # 轨迹的起点。process_id 是后面每一条日志都要对上的关联 ID。
+        logger.info(
+            "采集完成：process_id=%s，Evidence %d 条（%s）",
+            state.process_id,
+            len(state.evidence),
+            [item.evidence_type for item in state.evidence],
+        )
+        return state
+
     def run_once(self,state: KnowledgeProcessState) -> KnowledgeProcessState:
 
         # 重新调用tool要重置count数
+        previous_count = state.tool_call_count
         state = state.model_copy(update={"tool_call_count": 0})
+        if previous_count:
+            # 只在真的归零了才记：这条要解释的是「为什么重跑的那一轮又能调 5 次」，
+            # 首轮本来就没用过额度，记了反而是噪音。
+            logger.debug("tool_call_count 归零（上一轮用掉 %d 次）", previous_count)
 
         state = self.investigate(state)
         return self.generate_proposal(state)
@@ -137,11 +153,22 @@ class KnowledgeAgent:
                 "KnowledgeAgent 没有配置 LLM，无法做决策（构造时传入 llm=...）"
             )
 
-        return self.llm.complete(
+        decision = self.llm.complete(
             system=DECISION_SYSTEM_PROMPT,
             user=self.build_context(state),
             response_model=AgentDecision,
         )
+
+        # 轨迹里最重要的一条：这一轮 LLM 想干什么。决策**不**在这里执行。
+        # 两个计数说的不是一回事，所以都带上：tool_call_count + 1 是内层「这是第几次
+        # 调用 Tool」，iteration_count 是外层「第几轮重跑」（由 prepare_retry 累加）。
+        logger.info(
+            "决策 #%d（重试轮次 %d）：%s",
+            state.tool_call_count + 1,
+            state.iteration_count,
+            _describe_decision(decision),
+        )
+        return decision
 
     def execute(
         self,
@@ -179,7 +206,12 @@ class KnowledgeAgent:
         )
 
         converter = EVIDENCE_CONVERTERS[decision.tool_name]
-        return record_evidence(state, converter(tool_result))
+        evidence = converter(tool_result)
+
+        # 记的是转换**之后**的 Evidence：Tool 返回了什么在这里已被排版成 Evidence，
+        # 而「这一轮到底查到了哪条」是轨迹该回答的问题。
+        logger.info("Tool 结果入库：%s（%s）", evidence.evidence_type, evidence.location)
+        return record_evidence(state, evidence)
 
     def investigate(self, state: KnowledgeProcessState) -> KnowledgeProcessState:
         """Tool Calling Loop：反复「决策 → 执行」直到 LLM 说够了。
@@ -210,6 +242,10 @@ class KnowledgeAgent:
 
 
             if decision.action == "finish":
+                logger.info(
+                    "LLM 判定信息足够（finish），调查结束：共调用 Tool %d 次",
+                    state.tool_call_count,
+                )
                 return state
 
             # execute() 只负责执行并追加 Evidence，计数由循环自己记 ——
@@ -219,6 +255,13 @@ class KnowledgeAgent:
                 update={"tool_call_count": state.tool_call_count + 1}
             )
 
+        # 撞上限和「LLM 说够了」在 State 上长得一模一样（都是 status="collecting"），
+        # 所以这条 WARNING 是区分二者的唯一痕迹 —— 也是「这份提案为什么没查透」的答案。
+        logger.warning(
+            "调查达到上限 %d 次仍未 finish，带着现有 Evidence 退出（status 仍是 %s）",
+            MAX_TOOL_CALLS,
+            state.status,
+        )
         return state
 
     def generate_proposal(
@@ -266,6 +309,12 @@ class KnowledgeAgent:
         except EvidenceReferenceError as error:
             return _failed(state, str(error))
 
+        logger.info(
+            "提案生成成功：title=%r，core_features=%d，technologies=%d",
+            proposal.title,
+            len(proposal.core_features),
+            len(proposal.technologies),
+        )
         return state.model_copy(
             update={"proposal": proposal, "status": "analyzing"}
         )
@@ -278,6 +327,23 @@ def _failed(
 
     提案一并置回 None：失败态不该留着一份（可能来自上一次调用的）旧提案。
     """
+    # 三条失败路径（没有 Evidence / LLM 输出不合 ProposalDraft / 引用了不存在的
+    # Evidence 编号）都汇到这里，所以这一条 WARNING 就把它们全覆盖了 —— 不必在
+    # 每个 return 前各打一次，那样只会把同一件事说三遍。
+    logger.warning("提案失败：%s", message)
     return state.model_copy(
         update={"proposal": None, "status": "failed", "error": message}
     )
+
+
+def _describe_decision(decision: AgentDecision) -> str:
+    """决策 → 一行摘要。
+
+    AgentDecision 里只有 action / tool_name / tool_arguments，**没有 reason 字段**，
+    所以 finish 的「为什么」打不出来 —— 只能靠调用点记下的「用了几次 Tool 之后说的
+    finish」间接推断。要真正看到理由，得给 Schema 加字段并改 DECISION_SYSTEM_PROMPT，
+    那超出了打点的范围。
+    """
+    if decision.action == "finish":
+        return "finish（信息够了）"
+    return f"tool_call {decision.tool_name}（参数 {decision.tool_arguments or {}}）"

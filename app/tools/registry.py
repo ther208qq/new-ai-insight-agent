@@ -23,9 +23,12 @@ from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
+from app.logging import get_logger
 from app.tools.get_file import get_file
 from app.tools.get_project_structure import get_project_structure
 from app.tools.search_code import search_code
+
+logger = get_logger("tools.registry")
 
 # 仓库级参数：由 State 提供，不接受调用方传值
 REPO_PARAMS = ("owner", "repo")
@@ -48,8 +51,18 @@ def call_tool(
     owner: str,
     repo: str,
 ) -> Any:
-    """按 tool_name 找到 Tool 并执行，返回原始 Tool Result。"""
+    """按 tool_name 找到 Tool 并执行，返回原始 Tool Result。
+
+    这是全仓库 Tool 执行的唯一收口点，所以日志也只在这里打一处 —— 逐个 Tool 文件
+    各打一次，等于把同一件事说 N 遍，还得跟着 ALLOWED_TOOLS 一起改。
+    """
     if tool_name not in ALLOWED_TOOLS:
+        # 异常里已经写了原因，这里再留一条不是重复：investigate() 不捕这个异常，
+        # 它一路冒到 main.py 变成一行 print，中间过程就没了 —— 而「从第几轮开始
+        # 乱点名」恰恰是轨迹里最该看见的东西。
+        logger.warning(
+            "不支持的 Tool：%r（当前可执行：%s）", tool_name, sorted(ALLOWED_TOOLS)
+        )
         raise UnsupportedToolError(
             f"不支持的 Tool: {tool_name!r}；当前可执行的 Tool 只有 "
             f"{sorted(ALLOWED_TOOLS)}"
@@ -58,9 +71,18 @@ def call_tool(
     arguments = dict(tool_arguments or {})
     _reject_invalid_arguments(tool_name, arguments)
 
-    # owner / repo 由调用方传入，覆盖 LLM 写的值
+    # owner / repo 由调用方传入，覆盖 LLM 写的值。覆盖**之前**先记下它到底写了
+    # 什么 —— 覆盖之后就看不出来了，而这正是「LLM 把仓库填错」唯一的线索。
+    supplied = sorted(set(arguments) & set(REPO_PARAMS))
     arguments["owner"] = owner
     arguments["repo"] = repo
+    if supplied:
+        logger.debug(
+            "忽略 LLM 写的 %s，改用当前 State 的仓库 %s/%s", supplied, owner, repo
+        )
+
+    params = {k: v for k, v in arguments.items() if k not in REPO_PARAMS}
+    logger.info("Tool 调用：%s（参数 %s，仓库 %s/%s）", tool_name, params, owner, repo)
 
     return ALLOWED_TOOLS[tool_name](**arguments)
 
@@ -77,6 +99,12 @@ def _reject_invalid_arguments(tool_name: str, arguments: dict[str, Any]) -> None
 
     unknown = set(arguments) - set(parameter_names)
     if unknown:
+        logger.warning(
+            "Tool %r 不接受参数 %s（可用：%s）",
+            tool_name,
+            sorted(unknown),
+            sorted(parameter_names),
+        )
         raise UnsupportedToolError(
             f"Tool {tool_name!r} 不接受参数 {sorted(unknown)}，"
             f"可用参数: {sorted(parameter_names)}"
@@ -84,6 +112,7 @@ def _reject_invalid_arguments(tool_name: str, arguments: dict[str, Any]) -> None
 
     missing = required - set(arguments)
     if missing:
+        logger.warning("Tool %r 缺少必填参数 %s", tool_name, sorted(missing))
         raise UnsupportedToolError(
             f"Tool {tool_name!r} 缺少必填参数 {sorted(missing)}"
         )

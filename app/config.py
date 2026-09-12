@@ -6,13 +6,17 @@
 
 真实环境变量优先于 .env（load_dotenv 的 override=False），方便部署时覆盖。
 .env 不提交，格式见 .env.example。
+
+这里读两类配置，必填性刻意不同：LLM 端点参数（LLMSettings）缺了就跑不动，
+所以少一个都报错；日志级别（LogSettings）缺了只是少一层可观测性，回落到默认
+值即可 —— 见 load_log_settings。
 """
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -78,3 +82,66 @@ def load_llm_settings(*, env_path: Path | None = None) -> LLMSettings:
         )
     except ValidationError as error:
         raise ConfigError(f"LLM 配置不合法：{error}") from error
+
+
+DEFAULT_LOG_LEVEL = "INFO"
+
+# 写死而不是 logging.getLevelNamesMapping()：那个 3.11 才有，本项目是 3.10。
+# 也别写成 logging 模块里的常量，这里只关心「哪些名字算合法」。
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def normalize_log_level(value: str) -> str:
+    """去空白 + 转大写 + 校验，返回规范的级别名。
+
+    大小写不敏感是刻意的：.env 里写小写是常态，而 logging.Logger.setLevel()
+    只认大写精确匹配（setLevel("info") 会抛 ValueError）。
+
+    校验只此一处：LogSettings 的 validator 与 app/logging.py 的 _coerce_level()
+    共用它，避免「哪些级别算合法」有两份、哪天加一档时漏改一边。
+    放在 config.py 而不是 logging.py，是为了不让两个模块互相 import。
+    """
+    normalized = value.strip().upper()
+    if normalized not in LOG_LEVELS:
+        raise ValueError(f"未知日志级别 {value!r}，可用：{'/'.join(LOG_LEVELS)}")
+    return normalized
+
+
+class LogSettings(BaseModel):
+    """日志配置。目前只有级别一项，配成对象是为了和 LLMSettings 同一形状 ——
+    调用方（main.py）拿到的都是校验过的对象，不必知道背后读的是哪个变量。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    level: str = Field(
+        default=DEFAULT_LOG_LEVEL,
+        description="LOG_LEVEL（DEBUG / INFO / WARNING / ERROR / CRITICAL）",
+    )
+
+    @field_validator("level")
+    @classmethod
+    def _normalize_level(cls, value: str) -> str:
+        # 校验放这里，错误就由 pydantic 报成一条指名道姓的 ValidationError，
+        # 再由 load_log_settings 转成 ConfigError —— 和上面把数字型字段交给
+        # pydantic 转换是同一个理由。
+        return normalize_log_level(value)
+
+
+def load_log_settings(*, env_path: Path | None = None) -> LogSettings:
+    """读取 .env（或真实环境变量）里的 LOG_LEVEL，返回 LogSettings。
+
+    env_path 只给测试用；不传就读项目根目录下的 .env。
+
+    和 load_llm_settings 有一处刻意的不同：**不做必填检查**。LOG_LEVEL 是选填的，
+    没写 .env、甚至 .env 根本不存在（CI 就是），都回落到 INFO。日志级别猜一个总比
+    「连日志都起不来」好 —— 必填检查那条纪律要解决的是「缺了就跑不动的东西」，
+    这里不适用。
+    """
+    path = env_path or ENV_PATH
+    load_dotenv(path, override=False)
+
+    try:
+        return LogSettings(level=os.getenv("LOG_LEVEL") or DEFAULT_LOG_LEVEL)
+    except ValidationError as error:
+        raise ConfigError(f"LOG_LEVEL 配置不合法：{error}") from error

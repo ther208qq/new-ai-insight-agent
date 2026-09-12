@@ -29,6 +29,9 @@ from app.agents.reflection import ReflectionReviewer
 from app.graph.state import KnowledgeProcessState
 from app.llm import create_llm_client
 from app.llm.client import LLMClient
+from app.logging import get_logger
+
+logger = get_logger("graph.nodes")
 
 
 def knowledge_node(
@@ -62,8 +65,24 @@ def knowledge_node(
     workflow 里时注意这一点。
     """
     owner, repo = _owner_and_repo(state)
+    # 「第几轮」只有在这里看得见：iteration_count 由 workflow 的 prepare_retry 累加，
+    # 而节点本身不碰它。重试回路因此不必自己记一条日志 —— 下一轮开始时会说。
+    logger.info(
+        "knowledge 节点：开始第 %d 轮调查（process_id=%s，已用 Tool %d 次）",
+        state.iteration_count,
+        state.process_id,
+        state.tool_call_count,
+    )
+
     agent = KnowledgeAgent(owner, repo, llm=_resolve_llm(llm))
-    return agent.run_once(state)
+    result = agent.run_once(state)
+
+    logger.info(
+        "knowledge 节点完成：status=%s，proposal=%s",
+        result.status,
+        "有" if result.proposal is not None else "无",
+    )
+    return result
 
 
 def reflection_node(
@@ -98,6 +117,11 @@ def reflection_node(
     而它要求 evidence 非空。两者不会同时出现。
     """
     if state.proposal is None:
+        logger.warning(
+            "reflection 节点：没有 KnowledgeProposal 可审，落成 failed"
+            "（process_id=%s）",
+            state.process_id,
+        )
         return state.model_copy(
             update={
                 "status": "failed",
@@ -108,6 +132,8 @@ def reflection_node(
     reviewer = ReflectionReviewer(_resolve_llm(llm))
     result = reviewer.run(state.proposal, state.evidence)
 
+    # passed 那个结论不在这里重复记 —— ReflectionReviewer 已经记过，而它拿得到
+    # issues（更完整）。同一件事实只在能拿到最多信息的那一层说一次。
     return state.model_copy(
         update={"reflection_result": result, "status": "reflecting"}
     )

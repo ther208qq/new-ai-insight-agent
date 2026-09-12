@@ -23,9 +23,12 @@ from app.agents.prompts import REFLECTION_SYSTEM_PROMPT
 from app.graph.context import build_reflection_context
 from app.graph.reflection import build_reflection_result
 from app.llm.client import LLMClient
+from app.logging import get_logger
 from app.schemas.evidence import Evidence
 from app.schemas.knowledge import KnowledgeProposal
 from app.schemas.reflection import ReflectionDraft, ReflectionResult
+
+logger = get_logger("agent.reflection")
 
 
 class ReflectionReviewer:
@@ -64,4 +67,22 @@ class ReflectionReviewer:
             response_model=ReflectionDraft,
         )
 
-        return build_reflection_result(draft, evidence)
+        result = build_reflection_result(draft, evidence)
+
+        # passed 的结论只在这里打一处：reflection_node 不重复打。同一件事实只该在
+        # 能拿到最多信息的那一层说一次 —— 这里拿得到 issues，而它正是重试的待办清单。
+        #
+        # ValidationError / EvidenceReferenceError 两条路径刻意不打点：它们按设计
+        # 直接抛（ReflectionResult 里没有 error 字段），异常一路冒到调用方、信息完整；
+        # 为打点在外面包一层 try/except ... raise 会改变代码形状，并在「不吞异常」
+        # 的既有约定旁边开一个口子。
+        if result.passed:
+            logger.info("反思通过：%d 条 Evidence 支撑得住提案", len(evidence))
+        else:
+            logger.warning(
+                "反思未通过：%d 个 issue（%s）",
+                len(result.issues),
+                [issue.type for issue in result.issues],
+            )
+
+        return result
