@@ -22,8 +22,8 @@ from app.config import LOG_LEVEL_ENV_VAR, ConfigError, load_log_settings
 from app.llm import create_llm_client
 from app.logging import configure_logging
 
-DEFAULT_OWNER = "example"
-DEFAULT_REPO = "demo-project"
+DEFAULT_OWNER = "karpathy"
+DEFAULT_REPO = "micrograd"
 
 
 def main() -> int:

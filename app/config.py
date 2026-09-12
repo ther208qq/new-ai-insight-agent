@@ -7,9 +7,9 @@
 真实环境变量优先于 .env（load_dotenv 的 override=False），方便部署时覆盖。
 .env 不提交，格式见 .env.example。
 
-这里读两类配置，必填性刻意不同：LLM 端点参数（LLMSettings）缺了就跑不动，
-所以少一个都报错；日志级别（LogSettings）缺了只是少一层可观测性，回落到默认
-值即可 —— 见 load_log_settings。
+这里读三类配置，必填性刻意不同：LLM 端点参数（LLMSettings）缺了就跑不动，
+所以少一个都报错；GitHub token（GitHubSettings）与日志级别（LogSettings）都是
+选填的，缺了只是少点能力/可观测性，回落到默认值即可 —— 见各自的 load_*。
 """
 
 import os
@@ -150,3 +150,42 @@ def load_log_settings(*, env_path: Path | None = None) -> LogSettings:
         return LogSettings(level=os.getenv(LOG_LEVEL_ENV_VAR) or DEFAULT_LOG_LEVEL)
     except ValidationError as error:
         raise ConfigError(f"{LOG_LEVEL_ENV_VAR} 配置不合法：{error}") from error
+
+
+# 不带 ai_insight_ 前缀（与 LOG_LEVEL_ENV_VAR 相反）：GITHUB_TOKEN 是 GitHub
+# 生态的通用名字，gh CLI / Actions / CI 都认，改成私有的反而对不上工具链。
+GITHUB_TOKEN_ENV_VAR = "GITHUB_TOKEN"
+
+
+class GitHubSettings(BaseModel):
+    """访问 GitHub API 的配置。目前只有 token 一项。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    token: str | None = Field(
+        default=None,
+        description="GITHUB_TOKEN。选填：公开仓库不配也能读，只是限流额度低",
+    )
+
+
+def load_github_settings(*, env_path: Path | None = None) -> GitHubSettings:
+    """读取 .env（或真实环境变量）里的 GITHUB_TOKEN，返回 GitHubSettings。
+
+    env_path 只给测试用；不传就读项目根目录下的 .env。
+
+    读取必须和 load_dotenv 在同一个函数里：token 是 Tool 运行时才读的，不像
+    LLMSettings 那样在 main.py 启动时就被取走。指望别的模块先调过 load_dotenv
+    的话，「在 config 加载之前调 Tool」的路径会静默降级成匿名请求，再以「限流」
+    的面目失败 —— 报错还误导人去配 token，而 token 明明配了。
+
+    不做必填检查、也不做格式校验：公开仓库不带 token 能读，只是额度低；token
+    形态有好几种（ghp_ / github_pat_ / …）还允许自定义，硬套前缀只会误伤，
+    真写错了 GitHub 会回 401。
+    """
+    path = env_path or ENV_PATH
+    load_dotenv(path, override=False)
+
+    # strip()：从文件 export 进来的环境变量常带尾随换行，带进 header 会认证失败
+    # 得莫名其妙。空串归一成 None，省得调用方既要判空又要判 None。
+    token = (os.getenv(GITHUB_TOKEN_ENV_VAR) or "").strip()
+    return GitHubSettings(token=token or None)

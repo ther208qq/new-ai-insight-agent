@@ -99,8 +99,8 @@ class KnowledgeAgent:
         # 两个 Tool 的返回值由代码转成 Evidence
         state = record_evidence(
             state,
-            metadata_to_evidence(get_project_metadata(self.owner, self.repo)),
-            document_to_evidence(get_readme(self.owner, self.repo)),
+            metadata_to_evidence(get_project_metadata(self.source.url)),
+            document_to_evidence(get_readme(self.source.url)),
         )
 
         # 轨迹的起点。process_id 是后面每一条日志都要对上的关联 ID。

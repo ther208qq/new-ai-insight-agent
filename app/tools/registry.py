@@ -6,11 +6,12 @@ AgentDecision 里只有 tool_name 和 tool_arguments 两个字符串/字典，
     name → Tool 函数   （ALLOWED_TOOLS）
     Tool 函数 + arguments → Tool Result
 
-参数处理有一条固定策略：**所有 Tool 都取自同一个仓库**，所以 owner / repo
-永远以当前 State 的来源为准，调用方（也就是 LLM）在 tool_arguments 里写的
-owner / repo 一律忽略。这不是多余的防御 —— LLM 完全可能把 owner / repo
-填错、漏填，或填成它从 README 里看到（但并不属于本仓库）的名字。
-如果哪天需要跨仓库取证，再放开这条限制。
+参数处理有一条固定策略：**所有 Tool 都取自同一个仓库**，所以仓库地址永远以
+当前 State 的来源为准，调用方（也就是 LLM）在 tool_arguments 里写的仓库参数
+一律忽略。这不是多余的防御 —— LLM 完全可能把它填错、漏填，或填成它从 README
+里看到（但并不属于本仓库）的名字。如果哪天需要跨仓库取证，再放开这条限制。
+
+仓库参数是单个 url：三个 Tool 都收 url，registry 不必按 Tool 分辨该注入什么。
 
 registry 与 TOOL_DESCRIPTIONS 的分工：那边描述「有什么、能干什么」（给 LLM
 看），这边决定「谁能被真正执行」（给后端用）。两个清单目前并不一样 ——
@@ -30,8 +31,8 @@ from app.tools.search_code import search_code
 
 logger = get_logger("tools.registry")
 
-# 仓库级参数：由 State 提供，不接受调用方传值
-REPO_PARAMS = ("owner", "repo")
+# 仓库级参数：由 State 提供，不接受调用方传值。只有一个 —— 见模块 docstring。
+REPO_PARAMS = ("url",)
 
 ALLOWED_TOOLS: dict[str, Callable[..., Any]] = {
     "get_project_structure": get_project_structure,
@@ -71,11 +72,10 @@ def call_tool(
     arguments = dict(tool_arguments or {})
     _reject_invalid_arguments(tool_name, arguments)
 
-    # owner / repo 由调用方传入，覆盖 LLM 写的值。覆盖**之前**先记下它到底写了
-    # 什么 —— 覆盖之后就看不出来了，而这正是「LLM 把仓库填错」唯一的线索。
+    # url 由调用方传入，覆盖 LLM 写的值。覆盖**之前**先记下它到底写了什么 ——
+    # 覆盖之后就看不出来了，而这正是「LLM 把仓库填错」唯一的线索。
     supplied = sorted(set(arguments) & set(REPO_PARAMS))
-    arguments["owner"] = owner
-    arguments["repo"] = repo
+    arguments["url"] = f"https://github.com/{owner}/{repo}"
     if supplied:
         logger.debug(
             "忽略 LLM 写的 %s，改用当前 State 的仓库 %s/%s", supplied, owner, repo

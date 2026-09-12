@@ -13,7 +13,11 @@ class CodeMatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(description="匹配所在的文件路径")
-    line_number: int = Field(description="匹配所在行号，从 1 开始")
+    line_number: int | None = Field(
+        default=None,
+        description="匹配所在行号，从 1 开始。None 表示拿不到行号（GitHub 的代码搜索"
+        "接口不返回行号），这时只有 path 和 line 是可信的",
+    )
     line: str = Field(description="匹配到的那一行内容")
 
 

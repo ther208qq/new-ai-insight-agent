@@ -9,7 +9,7 @@ from app.graph.state import KnowledgeProcessState
 from app.schemas.document import DocumentContent
 from app.schemas.evidence import Evidence, EvidenceType
 from app.schemas.project import ProjectMetadata
-from app.schemas.search import SearchResult
+from app.schemas.search import CodeMatch, SearchResult
 from app.schemas.structure import ProjectStructure
 
 # 当前所有 Tool 都取自 GitHub；等出现别的数据源时再改成按 Tool 声明
@@ -93,9 +93,7 @@ def search_to_evidence(result: SearchResult) -> Evidence:
     LLM 需要区分「搜过了没有」和「还没搜过」。
     """
     if result.matches:
-        content = "\n".join(
-            f"{match.path}:{match.line_number}: {match.line}" for match in result.matches
-        )
+        content = "\n".join(_render_match(match) for match in result.matches)
         if result.truncated:
             content = f"{content}\n{_TRUNCATION_NOTICE}"
     else:
@@ -116,6 +114,16 @@ def record_evidence(
     return state.model_copy(
         update={"evidence": [*state.evidence, *evidences]},
     )
+
+
+def _render_match(match: CodeMatch) -> str:
+    """一条匹配渲染成一行。
+
+    行号可能没有（GitHub 的代码搜索接口不返回行号），这时只写路径 ——
+    写个 0 或者省略冒号都会让 LLM 以为那儿本来有个行号。
+    """
+    where = match.path if match.line_number is None else f"{match.path}:{match.line_number}"
+    return f"{where}: {match.line}"
 
 
 def _is_readme(path: str) -> bool:

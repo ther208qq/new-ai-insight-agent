@@ -6,8 +6,7 @@ from app.graph.evidence import (
 from app.graph.state import KnowledgeProcessState, Source
 from app.schemas.document import DocumentContent
 from app.schemas.evidence import Evidence
-from app.tools.get_project_metadata import get_project_metadata
-from app.tools.get_readme import get_readme
+from app.schemas.project import ProjectMetadata
 
 
 def make_state() -> KnowledgeProcessState:
@@ -18,8 +17,20 @@ def make_state() -> KnowledgeProcessState:
     )
 
 
+def make_metadata() -> ProjectMetadata:
+    """直接构造：元数据怎么取回来是 get_project_metadata 的事，这里只测它如何变 Evidence。"""
+    return ProjectMetadata(
+        name="demo-project",
+        description="一个用于演示 Knowledge Agent 的示例仓库。",
+        url="https://github.com/example/demo-project",
+        language="Python",
+        stars=128,
+        topics=["demo", "agent", "llm"],
+    )
+
+
 def test_metadata_能生成_evidence():
-    metadata = get_project_metadata("example", "demo-project")
+    metadata = make_metadata()
 
     evidence = metadata_to_evidence(metadata)
 
@@ -32,8 +43,17 @@ def test_metadata_能生成_evidence():
     assert '"stars": 128' in evidence.content
 
 
+def make_readme() -> DocumentContent:
+    """同上：README 怎么取回来是 get_readme 的事。"""
+    return DocumentContent(
+        path="README.md",
+        content="# Demo Project\n\n一个用于演示 Knowledge Agent 的示例仓库。\n",
+        truncated=False,
+    )
+
+
 def test_readme_能生成_evidence():
-    readme = get_readme("example", "demo-project")
+    readme = make_readme()
 
     evidence = document_to_evidence(readme)
 
@@ -68,8 +88,8 @@ def test_两条_evidence_都能进入_state():
 
     state = record_evidence(
         state,
-        metadata_to_evidence(get_project_metadata("example", "demo-project")),
-        document_to_evidence(get_readme("example", "demo-project")),
+        metadata_to_evidence(make_metadata()),
+        document_to_evidence(make_readme()),
     )
 
     assert len(state.evidence) == 2
@@ -84,7 +104,7 @@ def test_record_evidence_不修改传入的_state():
     state = make_state()
     before = state.model_dump()
 
-    record_evidence(state, metadata_to_evidence(get_project_metadata("example", "demo-project")))
+    record_evidence(state, metadata_to_evidence(make_metadata()))
 
     assert state.model_dump() == before
 
@@ -92,7 +112,7 @@ def test_record_evidence_不修改传入的_state():
 def test_可以连续追加():
     state = make_state()
 
-    state = record_evidence(state, metadata_to_evidence(get_project_metadata("a", "b")))
-    state = record_evidence(state, document_to_evidence(get_readme("a", "b")))
+    state = record_evidence(state, metadata_to_evidence(make_metadata()))
+    state = record_evidence(state, document_to_evidence(make_readme()))
 
     assert [e.evidence_type for e in state.evidence] == ["metadata", "readme"]

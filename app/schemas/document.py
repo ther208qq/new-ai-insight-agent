@@ -14,4 +14,7 @@ class DocumentContent(BaseModel):
 
     path: str = Field(description="文件路径，例如 README.md")
     content: str = Field(description="文件的文本内容")
-    truncated: bool = Field(description="内容是否因为长度限制被截断")
+    truncated: bool = Field(
+        default=False,
+        description="内容是否因为长度限制被截断",
+    )
