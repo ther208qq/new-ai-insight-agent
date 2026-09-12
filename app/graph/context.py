@@ -34,22 +34,28 @@ logger = get_logger("graph.context")
 # 保存的内容本身。
 MAX_EVIDENCE_CHARS = 2000
 
-# 整段 Context 的长度上限。多条 Evidence 各自没超，加起来仍可能超。
+# 整段 Context 的长度上限。多条 Evidence 各自没超，加起来仍可能超 —— 超出的部分
+# 按条消耗来处理（见 _render_evidence_list），不用「整段切一刀」。
 MAX_CONTEXT_CHARS = 8000
 
 _EMPTY = "（当前还没有收集到任何 Evidence）"
 
 _TRUNCATION_NOTICE = "（内容过长，已截断）"
 
-# Context 被截断时会丢掉后面的 Evidence，必须显式告诉模型，
-# 否则它会把「没看到」当成「不存在」，进而少调工具或误判信息已经足够。
-_CONTEXT_TRUNCATION_NOTICE = "\n\n（以上 Evidence 仅展示了前面一部分，后面还有内容未展示）"
+# 预算用完、正文完全放不下的说法。和 _TRUNCATION_NOTICE 说的不是一件事：那条是
+# 「这条自己太长」，这条是「Context 的总额度不够了」。
+_CONTEXT_BUDGET_NOTICE = "（正文未展示：Context 预算不足）"
 
-_EVIDENCE_TEMPLATE = """### [{index}] {evidence_type}
+# 预算不够放整条正文时，至少留这么多字才值得给残片。比这更短的一段既读不出上下
+# 文，又会让模型以为这就是全部 —— 不如直说没展示。
+_MIN_BODY_CHARS = 200
+
+_EVIDENCE_HEADER_TEMPLATE = """### [{index}] {evidence_type}
 - source: {source}
 - location: {location}
-- content:
-{content}"""
+- content:"""
+
+_SEPARATOR = "\n\n"
 
 # 反思 Context 的两个小标题。调查 Context 不需要 —— 那段里只有 Evidence，
 # 加标题反而多一层噪音。
@@ -102,7 +108,7 @@ def build_reflection_context(
        判断依据，顺序反过来读起来才是「先看结论、再核依据」。
     2. 长度上限只作用在 Evidence 上，Proposal 不截断 —— 它正是被审查的对象，
        看一半会让 LLM 把「没看到」当成「不存在」，报出一堆其实存在、只是被截掉
-       的字段（和 _CONTEXT_TRUNCATION_NOTICE 要解决的是同一类误判）。
+       的字段（和 _CONTEXT_BUDGET_NOTICE 要解决的是同一类误判）。
     """
     return (
         f"{_PROPOSAL_HEADER}\n\n{_render_proposal(proposal)}\n\n"
@@ -111,35 +117,51 @@ def build_reflection_context(
 
 
 def _render_evidence_list(evidence: list[Evidence]) -> str:
-    """把一串 Evidence 渲染成文本，并套上两层长度上限。
+    """把一串 Evidence 渲染成文本，并把 MAX_CONTEXT_CHARS 按条发放。
 
     build_context 与 build_reflection_context 共用 —— 截断规则只该有一处，
     否则「给 LLM 看多少」会随调用点不同而不同。编号（[n]）也由这里统一给出，
     两个入口看到的编号规则因此必然一致。
+
+    预算是**逐条消耗**的：一条一条往下发，发不出去的正文就不发。不先拼好再切
+    一刀（`text[:MAX_CONTEXT_CHARS]`），是因为那样会把排在后面的 Evidence 连编号
+    一起切掉，LLM 于是不知道自己还有第 5、6 条证据 —— 「没看到」被当成了「不
+    存在」，而这正是截断本身要防的误判。所以正文可以不给，元信息必须留下。
+
+    只有正文占预算，元信息不占：否则条数一多，后面的条目又会整体消失，回到同一
+    个问题上。极端情况下（预算耗尽后还剩一长串证据）总长因此会略微超出上限，
+    超出量是「每条的元信息 + 一句说明」。
     """
     if not evidence:
         return _EMPTY
 
-    blocks = [
-        _render_evidence(index, item)
-        for index, item in enumerate(evidence, start=1)
-    ]
+    blocks: list[str] = []
+    used = 0          # 已渲染出的字符数（含分隔符）
+    incomplete = 0    # 正文没能完整给出的条数
 
-    text = "\n\n".join(blocks)
-
-    if len(text) > MAX_CONTEXT_CHARS:
-        # 整段截断是一次真实的信息丢失（后面的 Evidence LLM 完全看不到），次数少、
-        # 后果重，所以是 WARNING；单条截断（见 _render_evidence）则是 DEBUG。
-        # 两个 Context 入口共用本函数，所以「给了 LLM 多少」这个事实只有这里在说。
-        logger.warning(
-            "Context 超长被截断：%d 字符 → %d，%d 条 Evidence 中后面的不再展示",
-            len(text),
-            MAX_CONTEXT_CHARS,
-            len(evidence),
+    for index, item in enumerate(evidence, start=1):
+        separator = len(_SEPARATOR) if blocks else 0
+        block, cut = _render_evidence(
+            index, item, budget=MAX_CONTEXT_CHARS - used - separator
         )
-        text = text[:MAX_CONTEXT_CHARS] + _CONTEXT_TRUNCATION_NOTICE
+        blocks.append(block)
+        used += separator + len(block)
+        incomplete += cut
 
-    return text
+    if incomplete:
+        # 预算不足是一次真实的信息丢失（正文没能完整给出去），次数少、后果重，
+        # 所以是 WARNING；单条截断（见 _render_evidence）则是 DEBUG。两个 Context
+        # 入口共用本函数，所以「给了 LLM 多少」这个事实只有这里在说。
+        logger.warning(
+            "Context 预算不足：%d 条 Evidence 用掉 %d 字（上限 %d），"
+            "其中 %d 条正文未完整展示",
+            len(evidence),
+            used,
+            MAX_CONTEXT_CHARS,
+            incomplete,
+        )
+
+    return _SEPARATOR.join(blocks)
 
 
 def _render_proposal(proposal: KnowledgeProposal) -> str:
@@ -186,11 +208,23 @@ def _citations(evidence: list[dict]) -> list[str]:
     return [item["location"] for item in evidence]
 
 
-def _render_evidence(index: int, evidence) -> str:
+def _render_evidence(index: int, evidence, *, budget: int) -> tuple[str, bool]:
+    """渲染一条 Evidence，返回 (文本, 正文是否没完整给出)。
+
+    budget 是这一条整块（元信息 + 正文）最多能占的字符数，由调用方按剩余额度给。
+    两道截断的语义不同，说明文字也不同：
+
+    * 超过 MAX_EVIDENCE_CHARS —— 「这条自己太长」，截到单条上限；
+    * 超过 budget —— 「Context 的额度不够了」，能挤多少算多少。
+
+    正文一点都放不下时不留空 content，而是写死一句「预算不足」：元信息必须留下，
+    否则 LLM 就不知道有这条证据。
+    """
     content = evidence.content.strip()
     if len(content) > MAX_EVIDENCE_CHARS:
         # 单条截断在真实仓库里几乎必然发生（README 动辄上万字符），放 INFO 会把
-        # 轨迹的骨架淹掉，所以是 DEBUG；整段截断才是 WARNING（见 _render_evidence_list）。
+        # 轨迹的骨架淹掉，所以是 DEBUG；整段预算不足才是 WARNING
+        # （见 _render_evidence_list）。
         logger.debug(
             "Evidence 正文被截断：[%d] %s 的 %d 字符 → %d 字符",
             index,
@@ -200,10 +234,22 @@ def _render_evidence(index: int, evidence) -> str:
         )
         content = content[:MAX_EVIDENCE_CHARS].rstrip() + _TRUNCATION_NOTICE
 
-    return _EVIDENCE_TEMPLATE.format(
+    header = _EVIDENCE_HEADER_TEMPLATE.format(
         index=index,
         evidence_type=evidence.evidence_type,
         source=evidence.source,
         location=evidence.location,
-        content=content,
     )
+    # 元信息下面那个换行也算在额度里
+    room = budget - len(header) - 1
+
+    if len(content) <= room:
+        return f"{header}\n{content}", False
+
+    # 说明文字是必须给的，所以留给残片的空间要先把它扣掉，免得说明把额度挤爆
+    fragment_len = room - len(_TRUNCATION_NOTICE) - 1
+    if fragment_len >= _MIN_BODY_CHARS:
+        fragment = content[:fragment_len].rstrip()
+        return f"{header}\n{fragment}\n{_TRUNCATION_NOTICE}", True
+
+    return f"{header}\n{_CONTEXT_BUDGET_NOTICE}", True

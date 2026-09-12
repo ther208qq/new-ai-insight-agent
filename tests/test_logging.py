@@ -335,7 +335,7 @@ def test_单条_evidence_被截断只记_debug():
 
 
 def test_context_整体超长会记一条_warning():
-    # 每条都被截到 2000 字，加起来仍远超整段上限
+    # 每条都被截到 2000 字，加起来仍超出整段预算
     state = _state_with(_wide_evidence(5, chars=MAX_EVIDENCE_CHARS * 2))
 
     stream = _capture(level="INFO")
@@ -343,7 +343,7 @@ def test_context_整体超长会记一条_warning():
 
     text = stream.getvalue()
     assert "WARNING" in text
-    assert "Context 超长被截断" in text
+    assert "Context 预算不足" in text
 
 
 def test_打点不改变运行结果():

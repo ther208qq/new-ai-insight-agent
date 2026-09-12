@@ -1,5 +1,64 @@
 # new-ai-insight-agent 版本记录
 
+## [1.0.12] - 2026-09-12
+
+## Tool 层改走真实 GitHub API（5 个 Tool + 共用客户端）
+- 新增 `app/tools/_github.py`：几个 Tool 都从同一个仓库取证，请求方式、认证、失败分类完全一样，所以收在一处 —— 各 Tool 只写「取什么」，不重复写「怎么取」。对外只给 `get_json` / `parse_repo` / `quote` 与几个异常
+- `parse_repo` 复用 `ghrepo`（不自己写 URL 解析）；异常归一成 `InvalidRepositoryURLError`，`url` 不是字符串时 ghrepo 抛的 `TypeError` 也接住 —— 调用方该看到的是同一件事「地址不合法」
+- 失败全部归一成 `GitHubAPIError` 的子类：`RepositoryNotFoundError`（404）、`GitHubRateLimitError`（429、或 `X-RateLimit-Remaining: 0`）、`InvalidRepositoryURLError`。**403 在 GitHub 有两种含义**（限流 / 没权限），按响应头判而不是按文案 —— 文案会变，头不会
+- 请求头三件套：`Accept: application/vnd.github+json`、`User-Agent`（缺了直接 403）、`X-GitHub-Api-Version: 2022-11-28`（不写就用 GitHub 的默认版本，而默认值会变）
+- 五个 Tool 的签名统一收敛到 `url`，**不再暴露 owner / repo**：
+  - `get_project_metadata(url)` → `GET /repos/{o}/{r}`。只映射 `ProjectMetadata` 里已有的字段，一个都不新加；`name` / `stargazers_count` 读不到就报错（不拿默认值糊过去），可选字段才回落
+  - `get_readme(url)` → `GET /repos/{o}/{r}/readme`。**不自己拼 README.md**：叫什么、在哪儿由 GitHub 去找（README.rst、docs/README.md 都认），拼错只会得到 404。正文 base64 → UTF-8；路径取 API 回的 `path` / `name`。**仓库没有 README 必须是明确错误** —— 返回一份假空文档，LLM 会以为它读到的就是一份空文档
+  - `get_file(url, path)` → `GET /repos/{o}/{r}/contents/{path}`。不指定分支，与 `get_project_structure` 读同一棵树，否则结构里列出的文件可能读不到
+  - `get_project_structure(url)` → 先问 `default_branch` 再取递归树，**不假设主干叫 main**；`MAX_PATHS = 2000` 与 GitHub 自己的 `truncated` 合并上报
+  - `search_code(url, query)` → `GET /search/code`。**必须带 token**（匿名直接 401，与另外四个不同），限流也独立且紧得多：认证用户 10 次/分钟
+- 超过 1MB 的文件 GitHub 只给元数据、不给正文（`encoding: "none"`）：两个取正文的 Tool 都**明确报错**，不把空字符串当内容返回 —— 那是个假文件 / 假 README，比报错更糟
+- 代码搜索接口**不返回绝对行号**（给的是匹配附近的文本窗口 + `indices`）→ `CodeMatch.line_number` 改成 `int | None`；`evidence._render_match()` 拿不到行号时只写路径 —— 写 `0` 或省略冒号都会让 LLM 以为那儿本来有个行号
+- `registry.REPO_PARAMS` 由 `("owner", "repo")` 收敛为 `("url",)`，调用时注入 `https://github.com/{owner}/{repo}`。「仓库地址一律以 State 为准、忽略 LLM 在 tool_arguments 里写的值」这条策略不变（覆盖**之前**仍先记一条 DEBUG，那是「LLM 把仓库填错」唯一的线索）
+- `app/config.py` 新增 `GITHUB_TOKEN_ENV_VAR` / `GitHubSettings` / `load_github_settings()`：
+  - **选填**：公开仓库不配也能读，只是额度从 5000/h 掉到 60/h
+  - **不带 `ai_insight_` 前缀**（与 `LOG_LEVEL_ENV_VAR` 相反）：GITHUB_TOKEN 是 GitHub 生态的通用名字，gh CLI / Actions / CI 都认，改成私有的反而对不上工具链
+  - token 的读取与 `load_dotenv` 必须在同一个函数里：它是 Tool 运行时才读的，不像 `LLMSettings` 那样在启动时就被取走。指望别的模块先调过 `load_dotenv` 的话，「在 config 加载之前调 Tool」的路径会静默降级成匿名请求，再以「限流」的面目失败 —— 报错还误导人去配 token，而 token 明明配了
+  - 不做格式校验：token 形态有好几种（ghp_ / github_pat_ / …）还允许自定义，硬套前缀只会误伤，真写错了 GitHub 会回 401
+- `main.py` 的默认仓库由 `example/demo-project` 改成 `karpathy/micrograd`（前者在 GitHub 上不存在，走真实 API 根本取不到数据）
+
+## Context 截断改为「逐条发放」
+- 问题：`_render_evidence_list()` 先把所有 Evidence 拼好，超长就 `text[:MAX_CONTEXT_CHARS]` —— 排在后面的 Evidence **连 `### [n]` 编号一起被切掉**，LLM 根本不知道还有第 5、6 条。而 Context 是它唯一的记忆（每次 `decide()` 都是无历史的新调用），于是它会重新去要刚拿过的东西
+- 这是实测出来的，不是推测：`simonw/llm` 一次运行 5 次额度全用满、2 次是**完全重复**的调用（`get_project_structure` 与 `get_file llm/plugins.py` 各取两遍），最后撞上限未 finish。日志里三次整段截断（8613→8000、10302→8000、11991→8000）正好对应被丢掉的那几条
+- 新策略：维护 `used`，逐条发放 `MAX_CONTEXT_CHARS`。正文先过单条上限 2000，再按剩余额度给 ——
+  - 整条给得下 → 整条给；
+  - 给不下 → 先扣掉说明文字，还能剩 ≥ `_MIN_BODY_CHARS`(200) 就给残片 +「（内容过长，已截断）」；
+  - 再不够 → **不给正文**，只留「编号 + 类型 + 出处」+「（正文未展示：Context 预算不足）」
+- **只有正文占预算，元信息不占**：否则条数一多，后面的条目又会整体消失，回到同一个问题上。代价是总长不再严格 ≤ 8000（极端情况下超出「每条的元信息 + 一句说明」，实测 7 条那种形状是 8192）—— 这是为「条目不许消失」这条更高优先级的规则付的
+- 两道截断的文案分开：`_TRUNCATION_NOTICE`（这条自己太长）与 `_CONTEXT_BUDGET_NOTICE`（额度不够了）；原来那句模糊的「后面还有内容未展示」删掉 —— 现在每条自己会说，而且分得清「截了」和「压根没展示」
+- 日志：只要有正文没给全，最后记**一条** WARNING「Context 预算不足：N 条 Evidence 用掉 X 字（上限 8000），其中 M 条正文未完整展示」（单条截断仍是 DEBUG，不变）
+- `build_context()` / `build_reflection_context()` 共用这一个入口，两个公开函数的签名与行为边界均未变
+
+## 测试
+- 新增：`test_context.py`(7)、`test_get_file.py`(16)、`test_get_project_structure.py`(15)、`test_search_code.py`(18)；重写：`test_get_project_metadata.py`(15)、`test_get_readme.py`(21)、`test_evidence.py`(7)
+- Tool 的测试**全部离线**：monkeypatch `urllib.request.urlopen` 返回预置 JSON，不打 GitHub、不消耗限流额度。真地址只在人工验证时跑 —— 进了套件就会因为别人改了自己的仓库而变红
+- `test_context.py` 钉住的六件事：单条超长只截正文而条目还在；6 条撑爆整段时 6 个编号一个不少；被挤掉的条目正文**精确等于**「元信息 + 一句说明」；正文合计 ≤ 预算；截断不改 `Evidence.content`；空列表行为不变
+- `test_logging.py` 改了 1 条断言：整段截断的 WARNING 文案由「Context 超长被截断」改为「Context 预算不足」
+- 全量 179 用例：**135 passed / 44 failed**（见「已知债」）
+
+## 人工验证（真实仓库、真实 LLM）
+- `tiangolo/fastapi`：LLM 给只收 `url` 的 `get_project_structure` 写了 `{"path": "fastapi"}` → `UnsupportedToolError` 抛出、无人接住，整次运行崩掉。两条缺口：提示词里没有参数契约；参数写错会升级成致命错误，而不是变成一条能让它自我修正的反馈
+- `simonw/llm`：5 次额度用满仍未 finish，其中 2 次是重复调用（原因见上）；提案照常生成（`generate_proposal()` 只看有没有 Evidence、不看 status），`architecture.pattern` 是空串
+- `karpathy/micrograd`：3 次调用后 `finish`（structure → engine.py → nn.py），无截断、无重复，提案里「闭包存局部反向、拓扑排序后逆序累积」的复述与代码相符；`architecture.pattern` 仍为空
+
+## 已知债（本次刻意未处理）
+- **44 条 agent 级测试全红**，且全是 `RepositoryNotFoundError`：它们用 `KnowledgeAgent(owner="example", repo="demo-project")`，`initialize_state()` 第一步就发真实请求，而 `example/demo-project` 在 GitHub 上不存在。Tool 从 mock 迁到真实 API 之后，这批测试的前提没了
+- 同一批测试**此前是绿的**：1.0.11 时全量 90 passed，本版 179 用例里 44 红
+- `app/tools/_mock_repo.py` 已无人 import（只剩它自己的 docstring），暂留
+
+## 待接
+- Context 预算是**软上限**：元信息不占额度（见上），要硬上限得先预扫一遍给剩余条目留位置
+- 五个上限仍是硬编码常量、无 env 入口：`MAX_EVIDENCE_CHARS` / `MAX_CONTEXT_CHARS` / `MAX_PATHS` / `SEARCH_LIMIT` / `MAX_TOOL_CALLS`
+- **循环层没有去重**：LLM 重复点名同一个 Tool、取同一份东西会照取一遍。Context 不再丢掉最新证据只是缓解了「为什么会重复要」，根治（去重，或反过来告诉它「这条已经取过」）在 `investigate()`
+- 提示词里仍没有参数契约（`registry._parameter_names()` 其实已经算得出来），参数写错仍会升级成 `UnsupportedToolError`
+- 未实现（设计文档范围之外）：Relation Agent、数据库持久化、pgvector / Embedding、RAG、API、多 Agent
+
 ## [1.0.11] - 2026-09-11
 
 ## 日志模块（app/logging.py）
