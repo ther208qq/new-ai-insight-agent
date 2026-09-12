@@ -18,10 +18,10 @@ flask/logging.py。
 
 关于配置在哪读
 --------------
-LOG_LEVEL 只有 config.load_log_settings() 一处读。configure_logging() **自己不读
-env**：它的默认是常量 INFO，想按 .env 配就由调用方传进来（main.py 那一行）。这样
-装配与读取分开，测试里 configure_logging(level="DEBUG") 就是全部 —— 不必 monkeypatch
-环境变量，也不会因为某台机器 .env 里写了 LOG_LEVEL=DEBUG 而让断言忽明忽暗。
+AI_INSIGHT_LOG_LEVEL 只有 config.load_log_settings() 一处读。configure_logging()
+**自己不读 env**：它的默认是常量 INFO，想按 .env 配就由调用方传进来（main.py 那一
+行）。这样装配与读取分开，测试里 configure_logging(level="DEBUG") 就是全部 —— 不必
+monkeypatch 环境变量，也不会因为某台机器 .env 里写了 DEBUG 而让断言忽明忽暗。
 
 关于不做什么
 ------------
@@ -36,7 +36,7 @@ from typing import IO
 
 from app.config import DEFAULT_LOG_LEVEL, LogSettings, normalize_log_level
 
-# 本项目的 logger 树根。一条 LOG_LEVEL 设在它上面就能控制全部：子 logger 的 level
+# 本项目的 logger 树根。一条 AI_INSIGHT_LOG_LEVEL 设在它上面就能控制全部：子 logger 的 level
 # 都是 NOTSET，实际级别从这一层继承。
 LOGGER_ROOT = "ai_insight"
 

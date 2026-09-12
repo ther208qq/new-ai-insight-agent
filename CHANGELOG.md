@@ -5,10 +5,10 @@
 ## 日志模块（app/logging.py）
 - 新增 `app/logging.py`：`get_logger(name)` / `configure_logging(settings=None, *, level=None, stream=None)`，用标准库 `logging`，**不引任何第三方日志库**
 - 定位是**调试追踪**而不是审计流：单行文本、时间只到秒（`datefmt="%H:%M:%S"`）、默认写 **stderr**。stdout 留给 `main.py` 的中文报告 —— 那是运行结果，日志是过程，混在一起就没法 `python main.py > out.txt` 了
-- logger 名分层：`get_logger("agent.knowledge")` → `ai_insight.agent.knowledge`，一条 `LOG_LEVEL` 设在 `ai_insight` 这一层就控制全部（子 logger 的 level 都是 `NOTSET`，向上继承）。**刻意不用 `__name__`**：那样树根会叫 `app`、名字里还带着文件名，看不出「哪一层在说话」。粒度约定是「一个模块一个 logger」，不要细到函数
+- logger 名分层：`get_logger("agent.knowledge")` → `ai_insight.agent.knowledge`，一条 `AI_INSIGHT_LOG_LEVEL` 设在 `ai_insight` 这一层就控制全部（子 logger 的 level 都是 `NOTSET`，向上继承）。**刻意不用 `__name__`**：那样树根会叫 `app`、名字里还带着文件名，看不出「哪一层在说话」。粒度约定是「一个模块一个 logger」，不要细到函数
 - 级别**必须设在 logger 上**，不能只设 handler 的级别：级别检查发生在记录进入任何 handler **之前**，未 configure 时 `ai_insight` 的 effective level 继承 root 的 `WARNING`，INFO 会被提前丢掉，handler 再宽松也收不到
 - **幂等**：重复 `configure_logging` 只摘掉自己装过的 handler（靠 `_OWN_HANDLER_MARK` 标记属性识别）再装新的，不会叠加。**刻意不用 `logger.handlers.clear()`**—— pytest 的 handler、宿主程序自己加的都挂在同一棵树上，clear 会把它们一起干掉，表现为「测试里的日志断言莫名消失」。也**不调 `logging.basicConfig()`**：它动的是 root，且 root 已有 handler 时静默什么都不做，格式就悄悄不生效了
-- `configure_logging` **自己不读 env**：默认级别是常量 `INFO`，要按 .env 配就由调用方传 `load_log_settings()`（`main.py` 那一行）。读 env 的只有 `load_*_settings`，装配的只有 `configure_*` —— 和 `load_llm_settings` / `create_llm_client` 的分工一致。这样测试里 `configure_logging(level="DEBUG")` 就是全部，不必 monkeypatch 环境变量，也不会因为某台机器 `.env` 写了 `LOG_LEVEL=DEBUG` 而让断言忽明忽暗
+- `configure_logging` **自己不读 env**：默认级别是常量 `INFO`，要按 .env 配就由调用方传 `load_log_settings()`（`main.py` 那一行）。读 env 的只有 `load_*_settings`，装配的只有 `configure_*` —— 和 `load_llm_settings` / `create_llm_client` 的分工一致。这样测试里 `configure_logging(level="DEBUG")` 就是全部，不必 monkeypatch 环境变量，也不会因为某台机器 `.env` 写了 `AI_INSIGHT_LOG_LEVEL=DEBUG` 而让断言忽明忽暗
 - 静音靠 `level="CRITICAL"`（本项目不打 CRITICAL，等于关掉），不再加一个 `enabled` 开关 —— 少一个概念
 - 默认用 `sys.stderr` 时顺手 `reconfigure(encoding="utf-8", errors="replace")`：中文日志撞上 GBK 控制台会抛 `UnicodeEncodeError`，被 logging 自己的异常处理吞成一行 `--- Logging error ---`。与 `main.py` 对 stdout 的处理同一个理由、同样先 `hasattr`（pytest 会换掉 `sys.stderr`）。调用方显式传了 `stream` 就不碰全局
 - 文件名叫 `logging.py` **不产生遮蔽**：绝对导入（PEP 328）下 `app/` 里任何 `import logging` 拿到的都是标准库（本模块第一行也正是它）。唯一能遮蔽的场景是「在 `app/` 目录里跑脚本」，本项目两个入口都从项目根跑。先例：`flask/logging.py`
@@ -29,10 +29,10 @@
 - 所有打点**只读不写**（`sorted(...)` / `len(...)` / 列表推导都是新建对象，没有一处对 state 或 arguments 赋值），也不打整份 `state`（pydantic 的 repr 虽无副作用，但会把整份 Evidence 写进 stderr），更不触发 LLM / Tool —— 所以「传入的 state 不会被修改」那批既有断言、以及「数 `llm.calls`」「数 evidence 条数」全部继续成立
 
 ## 环境变量
-- 新增选填的 `LOG_LEVEL`（DEBUG / INFO / WARNING / ERROR / CRITICAL，默认 INFO），`.env.example` 已补
+- 新增选填的 `AI_INSIGHT_LOG_LEVEL`（DEBUG / INFO / WARNING / ERROR / CRITICAL，默认 INFO），`.env.example` 已补。**名字带 `ai_insight_` 前缀是刻意的**：`LOG_LEVEL` 太通用，Docker / K8s / 各家 PaaS 的环境里可能已经有一个同名但管着别的东西的变量，而真实环境变量优先于 `.env`（`load_dotenv(override=False)`），撞上了会静默按别人的值走、日志级别莫名其妙。变量名收敛在 `config.LOG_LEVEL_ENV_VAR` 一处，`main.py` 与测试都引它，不写字面量
 - 与其他变量不同，**它不做必填检查**：没写 `.env`、甚至 `.env` 不存在（CI 就是），都回落到 INFO —— 日志级别猜一个总比「连日志都起不来」好。`_REQUIRED_ENV_VARS` 那条纪律要解决的是「缺了就跑不动的东西」，这里不适用
 - `LogSettings` / `load_log_settings()` 放在 `app/config.py`，与 `LLMSettings` / `load_llm_settings()` 同一形状；级别名归一化（`normalize_log_level()`）也放在那里，因为 `app/logging.py` 的 `_coerce_level()` 要复用它 —— 放 `logging.py` 会让两个模块互相 import。**大小写不敏感**是刻意的（`.env` 里写小写是常态），而 `Logger.setLevel()` 只认大写精确匹配
-- `main.py` 只在入口加一处 `configure_logging(load_log_settings())`；`LOG_LEVEL` 写错不拖垮整次运行，退回默认级别并说一声。**既有 12 处 `print` 一字未动** —— 那是对齐的中文报告，是「运行结果」，不是过程日志
+- `main.py` 只在入口加一处 `configure_logging(load_log_settings())`；级别写错不拖垮整次运行，退回默认级别并说一声。**既有 12 处 `print` 一字未动** —— 那是对齐的中文报告，是「运行结果」，不是过程日志
 
 ## 测试（tests/test_logging.py）
 - 新增 18 条测试：装配（幂等、不碰别人的 handler、默认不读 env、CRITICAL 静音、大小写、未知级别被拒、`get_logger` 无副作用）+ 接入点（Tool 调用、未知 Tool、每轮决策、撞上限、反思通过与未通过、两层截断、三档降级）+ 一条不变量（同一份 State 在 CRITICAL 与 DEBUG 下跑出的结果完全相同）

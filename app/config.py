@@ -86,6 +86,11 @@ def load_llm_settings(*, env_path: Path | None = None) -> LLMSettings:
 
 DEFAULT_LOG_LEVEL = "INFO"
 
+# 变量名带 ai_insight_ 前缀是刻意的：LOG_LEVEL 太通用，部署平台（Docker / K8s /
+# 各家 PaaS）的环境里很可能已经有一个同名的、管着别的东西 —— 而真实环境变量优先于
+# .env，撞上了就会静默按别人的值走，日志级别莫名其妙。前缀把它变成这个项目私有的。
+LOG_LEVEL_ENV_VAR = "AI_INSIGHT_LOG_LEVEL"
+
 # 写死而不是 logging.getLevelNamesMapping()：那个 3.11 才有，本项目是 3.10。
 # 也别写成 logging 模块里的常量，这里只关心「哪些名字算合法」。
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -116,7 +121,7 @@ class LogSettings(BaseModel):
 
     level: str = Field(
         default=DEFAULT_LOG_LEVEL,
-        description="LOG_LEVEL（DEBUG / INFO / WARNING / ERROR / CRITICAL）",
+        description="AI_INSIGHT_LOG_LEVEL（DEBUG / INFO / WARNING / ERROR / CRITICAL）",
     )
 
     @field_validator("level")
@@ -129,11 +134,11 @@ class LogSettings(BaseModel):
 
 
 def load_log_settings(*, env_path: Path | None = None) -> LogSettings:
-    """读取 .env（或真实环境变量）里的 LOG_LEVEL，返回 LogSettings。
+    """读取 .env（或真实环境变量）里的 AI_INSIGHT_LOG_LEVEL，返回 LogSettings。
 
     env_path 只给测试用；不传就读项目根目录下的 .env。
 
-    和 load_llm_settings 有一处刻意的不同：**不做必填检查**。LOG_LEVEL 是选填的，
+    和 load_llm_settings 有一处刻意的不同：**不做必填检查**。日志级别是选填的，
     没写 .env、甚至 .env 根本不存在（CI 就是），都回落到 INFO。日志级别猜一个总比
     「连日志都起不来」好 —— 必填检查那条纪律要解决的是「缺了就跑不动的东西」，
     这里不适用。
@@ -142,6 +147,6 @@ def load_log_settings(*, env_path: Path | None = None) -> LogSettings:
     load_dotenv(path, override=False)
 
     try:
-        return LogSettings(level=os.getenv("LOG_LEVEL") or DEFAULT_LOG_LEVEL)
+        return LogSettings(level=os.getenv(LOG_LEVEL_ENV_VAR) or DEFAULT_LOG_LEVEL)
     except ValidationError as error:
-        raise ConfigError(f"LOG_LEVEL 配置不合法：{error}") from error
+        raise ConfigError(f"{LOG_LEVEL_ENV_VAR} 配置不合法：{error}") from error

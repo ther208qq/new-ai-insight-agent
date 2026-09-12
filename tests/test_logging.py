@@ -26,7 +26,12 @@ from pydantic import ValidationError
 
 from app.agents.knowledge_agent import MAX_TOOL_CALLS, KnowledgeAgent
 from app.agents.reflection import ReflectionReviewer
-from app.config import DEFAULT_LOG_LEVEL, LLMSettings, LogSettings
+from app.config import (
+    DEFAULT_LOG_LEVEL,
+    LOG_LEVEL_ENV_VAR,
+    LLMSettings,
+    LogSettings,
+)
 from app.graph.context import MAX_EVIDENCE_CHARS, build_context
 from app.graph.state import KnowledgeProcessState, Source
 from app.llm import FakeLLM
@@ -188,7 +193,9 @@ def test_configure_不碰别人的_handler():
 
 
 def test_默认级别是常量_不读环境变量(monkeypatch):
-    monkeypatch.setenv("LOG_LEVEL", "CRITICAL")
+    # 用常量而不是字面量：如果写成已经废弃的 "LOG_LEVEL"，这条测试就废了 ——
+    # configure_logging 就算真的去读 AI_INSIGHT_LOG_LEVEL 也照样通过。
+    monkeypatch.setenv(LOG_LEVEL_ENV_VAR, "CRITICAL")
 
     configure_logging(stream=io.StringIO())
 
